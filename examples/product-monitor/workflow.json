@@ -1,0 +1,70 @@
+{
+  "id": "product-monitor",
+  "name": "Surveillance catalogue",
+  "startNodeId": "getProducts",
+  "nodes": [
+    {
+      "id": "getProducts",
+      "name": "GET /products",
+      "type": "http",
+      "method": "GET",
+      "url": "{{ global.baseUrl }}/products",
+      "responseType": "html"
+    },
+    {
+      "id": "extractProducts",
+      "name": "Extraction des produits",
+      "type": "extract",
+      "source": "getProducts",
+      "sourceType": "html",
+      "rules": [
+        {
+          "name": "titles",
+          "strategy": "css",
+          "selectors": [".product-card .title"],
+          "output": "list"
+        },
+        {
+          "name": "prices",
+          "strategy": "css",
+          "selectors": [".product-card .price"],
+          "output": "list"
+        }
+      ]
+    },
+    {
+      "id": "checkPriceDrop",
+      "name": "Le prix du premier produit a-t-il baissé sous le seuil ?",
+      "type": "condition",
+      "expression": "actions.extractProducts.output.prices[0] < global.targetPrice"
+    },
+    {
+      "id": "priceDropped",
+      "name": "Baisse de prix détectée",
+      "type": "stop",
+      "reason": "Prix du premier produit sous le seuil cible : notification à envoyer (V2)"
+    },
+    {
+      "id": "priceStable",
+      "name": "Aucune baisse de prix",
+      "type": "stop",
+      "reason": "Prix du premier produit toujours au-dessus du seuil cible"
+    }
+  ],
+  "edges": [
+    { "id": "getProducts->extractProducts", "from": "getProducts", "to": "extractProducts" },
+    { "id": "extractProducts->checkPriceDrop", "from": "extractProducts", "to": "checkPriceDrop" },
+    {
+      "id": "checkPriceDrop->priceDropped",
+      "from": "checkPriceDrop",
+      "to": "priceDropped",
+      "branch": "true"
+    },
+    {
+      "id": "checkPriceDrop->priceStable",
+      "from": "checkPriceDrop",
+      "to": "priceStable",
+      "branch": "false"
+    }
+  ]
+}
