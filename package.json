@@ -16,7 +16,13 @@
     "test:watch": "turbo run test:watch",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
-    "clean": "turbo run clean && rimraf node_modules"
+    "clean": "turbo run clean && rimraf node_modules",
+    "infra:up": "docker compose up -d postgres redis",
+    "infra:down": "docker compose down",
+    "db:generate": "pnpm --filter @datarover/database run generate",
+    "db:migrate": "pnpm --filter @datarover/database run migrate:dev",
+    "db:migrate:deploy": "pnpm --filter @datarover/database run migrate:deploy",
+    "db:studio": "pnpm --filter @datarover/database run studio"
   },
   "devDependencies": {
     "@eslint/js": "^9.15.0",

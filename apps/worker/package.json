@@ -1,0 +1,31 @@
+{
+  "name": "@datarover/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src",
+    "typecheck": "tsc --noEmit",
+    "clean": "rimraf dist .turbo"
+  },
+  "dependencies": {
+    "bullmq": "^5.34.0",
+    "@datarover/database": "workspace:*",
+    "@datarover/queue": "workspace:*",
+    "@datarover/workflow-core": "workspace:*",
+    "@datarover/workflow-types": "workspace:*",
+    "@datarover/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5",
+    "@types/node": "^20.14.0"
+  }
+}

@@ -1,0 +1,44 @@
+# Minimal infrastructure for local development of the backend (apps/api, apps/worker).
+#
+# This is NOT the full "Docker complet" environment described in Specs.md §19-21 (which also
+# containerizes web/api/worker/browser-worker) — that is a later iteration. For now this only
+# provides the two stateful dependencies (Postgres, Redis) that apps/api and apps/worker need to
+# run locally via `pnpm dev`/`pnpm start`. This file is the natural starting point for that later
+# `docker-compose.yml` and will be extended, not replaced.
+#
+# Usage: docker compose up -d postgres redis   (or: pnpm infra:up)
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-datarover}
+      POSTGRES_USER: ${POSTGRES_USER:-datarover}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-datarover}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - datarover_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-datarover} -d ${POSTGRES_DB:-datarover}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - datarover_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  datarover_postgres_data:
+  datarover_redis_data:
