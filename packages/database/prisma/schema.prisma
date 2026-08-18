@@ -1,0 +1,86 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ExecutionStatus {
+  pending
+  running
+  success
+  failed
+  cancelled
+  retrying
+}
+
+model Project {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  variables   Json     @default("{}")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workflows Workflow[]
+}
+
+model Workflow {
+  id        String   @id @default(cuid())
+  projectId String
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project    Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  versions   WorkflowVersion[]
+  executions Execution[]
+
+  @@index([projectId])
+}
+
+model WorkflowVersion {
+  id         String   @id @default(cuid())
+  workflowId String
+  version    Int
+  definition Json
+  createdAt  DateTime @default(now())
+
+  workflow   Workflow    @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  executions Execution[]
+
+  @@unique([workflowId, version])
+}
+
+model Execution {
+  id                String          @id @default(cuid())
+  workflowId        String
+  workflowVersionId String
+  status            ExecutionStatus @default(pending)
+  startedAt         DateTime?
+  finishedAt        DateTime?
+  error             String?
+  actionResults     Json            @default("[]")
+  createdAt         DateTime        @default(now())
+
+  workflow        Workflow        @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  workflowVersion WorkflowVersion @relation(fields: [workflowVersionId], references: [id], onDelete: Restrict)
+  logs            ExecutionLog[]
+
+  @@index([workflowId])
+}
+
+model ExecutionLog {
+  id          String   @id @default(cuid())
+  executionId String
+  timestamp   DateTime
+  level       String
+  message     String
+  nodeId      String?
+
+  execution Execution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+
+  @@index([executionId])
+}
