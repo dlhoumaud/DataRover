@@ -133,6 +133,40 @@ des imports de *valeur* pour que `emitDecoratorMetadata` référence la vraie cl
 `apps/api/eslint.config.mjs` désactive cette règle pour tout le package, avec l'explication en
 commentaire.
 
+### Correctifs post-itération 3 — `pnpm dev` cassé sur environnement neuf
+
+Signalé par un utilisateur lançant `pnpm dev` pour la première fois (pas seulement moi, qui avait
+toujours `.env` déjà chargé à la main dans mon shell pendant tout le développement — ce qui
+masquait le premier des deux bugs ci-dessous). Deux causes réelles, indépendantes :
+
+1. **Aucun mécanisme ne chargeait `.env` automatiquement.** `apps/api` (NestJS/`ConfigModule`),
+   `apps/worker` et les scripts Prisma de `packages/database` lisent `process.env` directement ;
+   sans un shell l'ayant déjà exporté, `DATABASE_URL`/`REDIS_HOST`/... sont `undefined`. Fixé en
+   enveloppant leurs scripts `dev`/`start`/`test` (et les scripts Prisma nécessitant une connexion
+   réelle) avec `dotenv-cli`, pointé explicitement sur le `.env` racine
+   (`dotenv -e ../../.env -- ...`) — fonctionne quel que soit le dossier depuis lequel
+   Turborepo/pnpm exécute le script. `apps/web` n'était pas concerné (Vite charge déjà `.env` via
+   `envDir` dans `vite.config.ts`). **Ne crée jamais de `.env` dupliqué dans un sous-dossier**
+   (`apps/api/.env`, etc.) pour contourner ce genre de symptôme — un seul `.env`, à la racine, sinon
+   les deux copies finissent par diverger silencieusement.
+2. **Race condition dans `tsup --watch`.** Chaque `tsup.config.ts` de package avait `clean: true`
+   inconditionnel. En mode `dev`, la tâche `dev` de Turborepo ne dépendait pas de `^build` : les 10
+   packages/apps démarraient leur watcher en parallèle, et `tsup --watch` supprime `dist/` à
+   *chaque* démarrage — y compris juste après qu'un autre package venait de lire ce même `dist/`
+   (résolution de module workspace pnpm), provoquant des `Cannot find module .../dist/index.js`
+   ou `Could not find a declaration file` transitoires et non déterministes. Fixé par deux
+   changements complémentaires : `turbo.json` fait maintenant dépendre `dev` de `^build` (un build
+   complet une fois, avant que les watchers ne démarrent) ; et chaque `tsup.config.ts` n'active
+   `clean` qu'en dehors du mode watch (`clean: !options.watch`, via la forme fonction de
+   `defineConfig`).
+
+Par ailleurs, `pnpm dev` lance 10 tâches persistantes (une par package/app ayant un script `dev`),
+soit exactement la limite de concurrence par défaut de Turborepo (10) — `turbo.json` déclare donc
+`"concurrency": "11"` pour laisser une marge.
+
+**Vérifié** : `pnpm dev` et `pnpm test` passent tous les deux sur un état complètement neuf
+(`dist/` et cache Turborepo supprimés, `.env` jamais sourcé manuellement dans le shell).
+
 ## Explicitement hors périmètre à ce stade
 
 - **Preview HTML + sélection visuelle** de sélecteurs (§6).

@@ -66,6 +66,15 @@ Scripts liés à la base de données (voir [`packages/database`](./packages/data
 | `pnpm db:migrate:deploy` | Applique les migrations existantes sans en créer (usage prod/CI) |
 | `pnpm db:studio` | Ouvre Prisma Studio (explorateur de données) |
 
+> **Un seul `.env`, à la racine.** Les scripts `dev`/`start`/`test` d'`apps/api`, `apps/worker` et
+> les scripts Prisma de `packages/database` le chargent automatiquement via `dotenv-cli`
+> (`dotenv -e ../../.env -- ...`), quel que soit le dossier depuis lequel Turborepo/pnpm les
+> exécute — inutile de faire `source .env` à la main, et surtout **ne crée pas de `.env` dans
+> `apps/api`, `apps/worker` ou ailleurs** : un second fichier finit par désynchroniser des valeurs
+> (port, identifiants...) et produit des bugs difficiles à diagnostiquer. `apps/web` gère son
+> propre chargement via `envDir` dans `vite.config.ts` (mécanisme Vite, pointé vers ce même `.env`
+> racine) — rien à faire de spécial là non plus.
+
 ---
 
 ## Mode développement
