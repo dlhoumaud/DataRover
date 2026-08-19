@@ -6,6 +6,8 @@ import {
   HttpNodeSchema,
   SetVariableNodeSchema,
   StopNodeSchema,
+  TextCryptoNodeSchema,
+  DataTransformNodeSchema,
 } from "./action";
 
 describe("HttpNodeSchema", () => {
@@ -182,6 +184,232 @@ describe("StopNodeSchema", () => {
   });
 });
 
+describe("DataTransformNodeSchema", () => {
+  it("parses a valid node with a mixed operations pipeline, defaulting inputType/outputType", () => {
+    const result = DataTransformNodeSchema.parse({
+      id: "n6",
+      name: "Normalize title",
+      type: "dataTransform",
+      input: "{{ actions.extract1.output.title }}",
+      operations: [
+        { type: "trim" },
+        { type: "lower" },
+        { type: "replace", search: " ", replacement: "-", all: true },
+      ],
+    });
+    expect(result.operations).toHaveLength(3);
+    expect(result.operations[1]).toEqual({ type: "lower" });
+    expect(result.inputType).toBe("raw");
+    expect(result.outputType).toBe("text");
+  });
+
+  it("accepts an explicit inputType/outputType and structured operations", () => {
+    const result = DataTransformNodeSchema.parse({
+      id: "n6",
+      name: "Extract price",
+      type: "dataTransform",
+      input: "{{ actions.http1.output }}",
+      inputType: "json",
+      operations: [{ type: "getPath", path: "$.items[0].price" }],
+      outputType: "float",
+    });
+    expect(result.inputType).toBe("json");
+    expect(result.outputType).toBe("float");
+    expect(result.operations[0]).toEqual({ type: "getPath", path: "$.items[0].price" });
+  });
+
+  it("defaults replace.all to false and padStart.char to a space", () => {
+    const result = DataTransformNodeSchema.parse({
+      id: "n6",
+      name: "Pad",
+      type: "dataTransform",
+      input: "{{ 1 }}",
+      operations: [
+        { type: "replace", search: "a", replacement: "b" },
+        { type: "padStart", length: 4 },
+      ],
+    });
+    expect(result.operations[0]).toMatchObject({ all: false });
+    expect(result.operations[1]).toMatchObject({ char: " " });
+  });
+
+  it("rejects an empty operations array", () => {
+    const input = { id: "n6", name: "No-op", type: "dataTransform", input: "x", operations: [] };
+    expect(DataTransformNodeSchema.safeParse(input).success).toBe(false);
+  });
+
+  it("rejects an unknown operation type", () => {
+    const input = {
+      id: "n6",
+      name: "Bad op",
+      type: "dataTransform",
+      input: "x",
+      operations: [{ type: "titleCase" }],
+    };
+    expect(DataTransformNodeSchema.safeParse(input).success).toBe(false);
+  });
+
+  it("rejects an unknown inputType/outputType", () => {
+    const badInput = {
+      id: "n6",
+      name: "Bad",
+      type: "dataTransform",
+      input: "x",
+      inputType: "csv",
+      operations: [{ type: "lower" }],
+    };
+    expect(DataTransformNodeSchema.safeParse(badInput).success).toBe(false);
+
+    const badOutput = {
+      id: "n6",
+      name: "Bad",
+      type: "dataTransform",
+      input: "x",
+      operations: [{ type: "lower" }],
+      outputType: "array",
+    };
+    expect(DataTransformNodeSchema.safeParse(badOutput).success).toBe(false);
+  });
+});
+
+describe("TextCryptoNodeSchema", () => {
+  it("parses a valid hash pipeline", () => {
+    const result = TextCryptoNodeSchema.parse({
+      id: "n7",
+      name: "Hash id",
+      type: "textCrypto",
+      input: "{{ actions.extract1.output.id }}",
+      operations: [{ type: "hash", algorithm: "sha256" }],
+    });
+    expect(result.operations[0]).toMatchObject({ algorithm: "sha256", digest: "hex" });
+  });
+
+  it("parses an encrypt/decrypt pipeline", () => {
+    const result = TextCryptoNodeSchema.parse({
+      id: "n7",
+      name: "Round-trip",
+      type: "textCrypto",
+      input: "secret",
+      operations: [
+        { type: "encrypt", passphrase: "s3cret" },
+        { type: "decrypt", passphrase: "s3cret" },
+      ],
+    });
+    expect(result.operations).toHaveLength(2);
+  });
+
+  it("parses an encrypt/decrypt pipeline with an explicit algorithm", () => {
+    const result = TextCryptoNodeSchema.parse({
+      id: "n7",
+      name: "AES-GCM round-trip",
+      type: "textCrypto",
+      input: "secret",
+      operations: [
+        { type: "encrypt", algorithm: "aes-256-gcm", passphrase: "s3cret" },
+        { type: "decrypt", algorithm: "aes-256-gcm", passphrase: "s3cret" },
+      ],
+    });
+    expect(result.operations[0]).toMatchObject({ algorithm: "aes-256-gcm" });
+  });
+
+  it("leaves algorithm undefined (not defaulted) when omitted, for backward compatibility", () => {
+    const result = TextCryptoNodeSchema.parse({
+      id: "n7",
+      name: "No algorithm specified",
+      type: "textCrypto",
+      input: "secret",
+      operations: [{ type: "encrypt", passphrase: "s3cret" }],
+    });
+    expect(result.operations[0]).not.toHaveProperty("algorithm");
+  });
+
+  it("parses an rsaEncrypt/rsaDecrypt pipeline", () => {
+    const result = TextCryptoNodeSchema.parse({
+      id: "n7",
+      name: "RSA",
+      type: "textCrypto",
+      input: "secret",
+      operations: [
+        { type: "rsaEncrypt", publicKey: "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----" },
+      ],
+    });
+    expect(result.operations[0]).toMatchObject({ type: "rsaEncrypt" });
+  });
+
+  it("rejects an rsaEncrypt operation with an empty public key", () => {
+    const input = {
+      id: "n7",
+      name: "Bad",
+      type: "textCrypto",
+      input: "x",
+      operations: [{ type: "rsaEncrypt", publicKey: "" }],
+    };
+    expect(TextCryptoNodeSchema.safeParse(input).success).toBe(false);
+  });
+
+  it("parses a url encode/decode pipeline", () => {
+    const result = TextCryptoNodeSchema.parse({
+      id: "n7",
+      name: "URL round-trip",
+      type: "textCrypto",
+      input: "a b/c",
+      operations: [
+        { type: "encode", encoding: "url" },
+        { type: "decode", encoding: "url" },
+      ],
+    });
+    expect(result.operations).toHaveLength(2);
+  });
+
+  it("accepts every newly-added hash algorithm", () => {
+    for (const algorithm of ["sha224", "sha384", "sha3-256", "sha3-512", "ripemd160", "blake2b512"]) {
+      const result = TextCryptoNodeSchema.safeParse({
+        id: "n7",
+        name: "Hash",
+        type: "textCrypto",
+        input: "x",
+        operations: [{ type: "hash", algorithm }],
+      });
+      expect(result.success).toBe(true);
+    }
+  });
+
+  it("accepts every newly-added symmetric cipher algorithm", () => {
+    for (const algorithm of ["aes-128-cbc", "aes-192-gcm", "des-ede3-cbc", "chacha20-poly1305"]) {
+      const result = TextCryptoNodeSchema.safeParse({
+        id: "n7",
+        name: "Cipher",
+        type: "textCrypto",
+        input: "x",
+        operations: [{ type: "encrypt", algorithm, passphrase: "k" }],
+      });
+      expect(result.success).toBe(true);
+    }
+  });
+
+  it("rejects an encrypt operation with an empty passphrase", () => {
+    const input = {
+      id: "n7",
+      name: "Bad",
+      type: "textCrypto",
+      input: "x",
+      operations: [{ type: "encrypt", passphrase: "" }],
+    };
+    expect(TextCryptoNodeSchema.safeParse(input).success).toBe(false);
+  });
+
+  it("rejects an unsupported hash algorithm", () => {
+    const input = {
+      id: "n7",
+      name: "Bad",
+      type: "textCrypto",
+      input: "x",
+      operations: [{ type: "hash", algorithm: "sha3" }],
+    };
+    expect(TextCryptoNodeSchema.safeParse(input).success).toBe(false);
+  });
+});
+
 describe("ActionNodeSchema (discriminated union)", () => {
   const validByType: Record<string, unknown> = {
     http: {
@@ -215,6 +443,20 @@ describe("ActionNodeSchema (discriminated union)", () => {
       id: "n5",
       name: "Stop",
       type: "stop",
+    },
+    dataTransform: {
+      id: "n6",
+      name: "Normalize",
+      type: "dataTransform",
+      input: "x",
+      operations: [{ type: "lower" }],
+    },
+    textCrypto: {
+      id: "n7",
+      name: "Hash",
+      type: "textCrypto",
+      input: "x",
+      operations: [{ type: "hash", algorithm: "md5" }],
     },
   };
 

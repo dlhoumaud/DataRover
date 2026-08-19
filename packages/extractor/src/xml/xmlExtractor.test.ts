@@ -47,12 +47,24 @@ describe("extractWithXml", () => {
     const outcome = extractWithXml(
       CATALOG_XML,
       rule({
-        selectors: ["$.catalog.product[0]['@_id']"],
+        selectors: ["$.catalog.product[0]['attr_id']"],
         output: "text",
       }),
     );
 
     expect(outcome.value).toBe("p1");
+  });
+
+  it("reaches an attribute on a non-repeated (singular, not array-wrapped) element", () => {
+    // Real bug found and fixed: fast-xml-parser's default "@_" attribute prefix collides with
+    // jsonpath-plus's own "@" (current-node) sigil specifically when the parent resolves to a
+    // single object rather than an array — `product[0]['@_id']` above never exercised that path.
+    const outcome = extractWithXml(
+      `<config version="2"><value>ok</value></config>`,
+      rule({ selectors: ["$.config['attr_version']"], output: "text" }),
+    );
+
+    expect(outcome.value).toBe(2);
   });
 
   it("parses numeric tag values as numbers", () => {

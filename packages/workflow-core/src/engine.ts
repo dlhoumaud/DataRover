@@ -11,10 +11,12 @@ import type {
 
 import type { ExecutionEvent } from "./events.js";
 import { conditionExecutor } from "./executors/conditionExecutor.js";
+import { dataTransformExecutor } from "./executors/dataTransformExecutor.js";
 import { extractExecutor } from "./executors/extractExecutor.js";
 import { httpExecutor } from "./executors/httpExecutor.js";
 import { setVariableExecutor } from "./executors/setVariableExecutor.js";
 import { stopExecutor } from "./executors/stopExecutor.js";
+import { textCryptoExecutor } from "./executors/textCryptoExecutor.js";
 import type { EngineVariables, NodeExecutionContext, NodeExecutor } from "./executors/types.js";
 import { getNextNodeId, getNodeById, validateDefinition } from "./graph.js";
 import { withRetry, withTimeout } from "./retry.js";
@@ -44,10 +46,11 @@ function nowIso(): string {
 /**
  * Executes `WorkflowDefinition` graphs.
  *
- * Ships with five default node executors (`http`, `extract`, `condition`,
- * `setVariable`, `stop`); pass `executors` to the constructor to override
- * or extend that registry (e.g. to add a `"browser"` executor in a future
- * version) without needing to modify this class.
+ * Ships with seven default node executors (`http`, `extract`, `condition`,
+ * `setVariable`, `stop`, `dataTransform`, `textCrypto`); pass `executors` to
+ * the constructor to override or extend that registry (e.g. to add a
+ * `"browser"` executor in a future version) without needing to modify this
+ * class.
  */
 export class WorkflowEngine {
   private readonly executors: Record<string, NodeExecutor>;
@@ -59,6 +62,8 @@ export class WorkflowEngine {
       condition: conditionExecutor as NodeExecutor,
       setVariable: setVariableExecutor as NodeExecutor,
       stop: stopExecutor as NodeExecutor,
+      dataTransform: dataTransformExecutor as NodeExecutor,
+      textCrypto: textCryptoExecutor as NodeExecutor,
     };
     this.executors = { ...defaults, ...options?.executors } as Record<string, NodeExecutor>;
   }

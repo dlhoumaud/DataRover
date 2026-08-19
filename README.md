@@ -12,11 +12,19 @@ réel d'avancement (ce qui est implémenté vs le reste de la vision) est docume
 
 ## État actuel
 
-Quatre itérations livrées : le **moteur de workflow** (packages TypeScript purs), un **backend
+Cinq itérations livrées : le **moteur de workflow** (packages TypeScript purs), un **backend
 exécutable** (API NestJS + PostgreSQL + worker BullMQ), une **UI React** (éditeur visuel React
-Flow) branchée dessus, et l'outil de **preview HTML + sélection visuelle d'éléments** (cliquer un
-élément dans un aperçu sandboxé de la page cible pour générer un node d'extraction). Pas encore de
-scheduler exécutable, de Docker complet ni d'Electron (voir
+Flow, **plein écran**) branchée dessus, l'outil de **preview HTML + sélection visuelle
+d'éléments** (cliquer un élément dans un aperçu sandboxé de la page cible, avec rendu JavaScript
+optionnel pour les pages React/Vue, pour générer un node d'extraction), et des **nodes de
+traitement de données** (`dataTransform`, affiché "Traitement" — entrée brute/JSON/YAML/XML,
+sortie texte/liste/tableau/entier/décimal/booléen déduite automatiquement de la dernière opération
+— lower/upper/replace/regex/slice/trim/pad en mode brut, getPath (JSONPath)/keys/values/stringify
+en mode structuré ; `textCrypto` : hash — md5 à sha3-512, ripemd160, blake2 —, encodage —
+base64/hex/URL/charsets —, chiffrement symétrique — AES/3DES/chacha20-poly1305 — et RSA
+asymétrique) avec palette colorée et menu contextuel (dupliquer/supprimer) dans l'éditeur. Pas
+encore de scheduler exécutable, de
+Docker complet ni d'Electron (voir
 [`ARCHITECTURE.md`](./ARCHITECTURE.md) pour le détail et la feuille de route).
 
 ```text
@@ -225,7 +233,7 @@ au fur et à mesure qu'ils seront ajoutés.
 ### Tests e2e navigateur (`apps/web/e2e`)
 
 Rejoue dans un **vrai navigateur** (Firefox headless, piloté via `selenium-webdriver` +
-`geckodriver`) deux parcours :
+`geckodriver`) trois parcours :
 
 - `workflow.e2e.test.ts` — celui de la vérification manuelle de l'itération 3 : créer un projet →
   créer un workflow → ajouter un node HTTP via la palette → l'éditer dans l'inspecteur →
@@ -236,6 +244,10 @@ Rejoue dans un **vrai navigateur** (Firefox headless, piloté via `selenium-webd
   WebDriver dans l'iframe sandboxée** pour cliquer un vrai élément, vérifier que les sélecteurs
   candidats affichés correspondent à l'exemple du cahier des charges, valider la règle, et
   confirmer qu'un node `extract` relié apparaît dans le canvas.
+- `nodeContextMenu.e2e.test.ts` — celui de l'itération 5 : chaque bouton de la palette affiche son
+  point de couleur, les nodes `dataTransform`/`textCrypto` s'ajoutent et s'éditent, un clic droit
+  sur un node ouvre le menu contextuel personnalisé, "Dupliquer" crée un node distinct (vérifié via
+  l'attribut `data-id` de React Flow) et "Supprimer" ne retire que le node ciblé.
 
 Firefox plutôt que Chromium/Playwright : le Chromium embarqué par Playwright nécessite des
 bibliothèques système installées via `sudo apt-get`, indisponible sur certaines machines de dev de

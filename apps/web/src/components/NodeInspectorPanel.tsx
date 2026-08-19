@@ -4,6 +4,9 @@ import { ExtractNodeInspector } from "./inspectors/ExtractNodeInspector";
 import { ConditionNodeInspector } from "./inspectors/ConditionNodeInspector";
 import { SetVariableNodeInspector } from "./inspectors/SetVariableNodeInspector";
 import { StopNodeInspector } from "./inspectors/StopNodeInspector";
+import { DataTransformNodeInspector } from "./inspectors/DataTransformNodeInspector";
+import { TextCryptoNodeInspector } from "./inspectors/TextCryptoNodeInspector";
+import { NODE_LABELS } from "../lib/nodeStyles";
 
 export function NodeInspectorPanel({
   node,
@@ -58,6 +61,10 @@ export function NodeInspectorPanel({
         return <SetVariableNodeInspector key={currentNode.id} node={currentNode} onChange={onChange} />;
       case "stop":
         return <StopNodeInspector key={currentNode.id} node={currentNode} onChange={onChange} />;
+      case "dataTransform":
+        return <DataTransformNodeInspector key={currentNode.id} node={currentNode} onChange={onChange} />;
+      case "textCrypto":
+        return <TextCryptoNodeInspector key={currentNode.id} node={currentNode} onChange={onChange} />;
       default: {
         const exhaustiveCheck: never = currentNode;
         throw new Error(`Type de node non supporté: ${String((exhaustiveCheck as ActionNode).type)}`);
@@ -70,7 +77,7 @@ export function NodeInspectorPanel({
       <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
         <div>
           <h2 className="truncate text-sm font-semibold text-gray-900">{currentNode.name}</h2>
-          <p className="text-xs uppercase tracking-wide text-gray-400">{currentNode.type}</p>
+          <p className="text-xs uppercase tracking-wide text-gray-400">{NODE_LABELS[currentNode.type]}</p>
         </div>
         <button
           type="button"

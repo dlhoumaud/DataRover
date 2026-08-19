@@ -1,11 +1,14 @@
 import type { ActionNode } from "@datarover/workflow-types";
+import { NODE_COLORS } from "../lib/nodeStyles";
 
 const NODE_TYPE_BUTTONS: ReadonlyArray<{ type: ActionNode["type"]; label: string }> = [
-  { type: "http", label: "+ HTTP" },
-  { type: "extract", label: "+ Extraction" },
-  { type: "condition", label: "+ Condition" },
-  { type: "setVariable", label: "+ Variables" },
-  { type: "stop", label: "+ Stop" },
+  { type: "http", label: "HTTP" },
+  { type: "extract", label: "Extraction" },
+  { type: "condition", label: "Condition" },
+  { type: "setVariable", label: "Variables" },
+  { type: "stop", label: "Stop" },
+  { type: "dataTransform", label: "Traitement" },
+  { type: "textCrypto", label: "Crypto / Encodage" },
 ];
 
 export function NodePalette({
@@ -20,9 +23,13 @@ export function NodePalette({
           key={button.type}
           type="button"
           onClick={() => onAddNode(button.type)}
-          className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-100"
+          className="flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-100"
         >
-          {button.label}
+          <span
+            className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${NODE_COLORS[button.type]}`}
+            aria-hidden="true"
+          />
+          + {button.label}
         </button>
       ))}
     </div>

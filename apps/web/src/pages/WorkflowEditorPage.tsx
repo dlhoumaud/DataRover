@@ -9,6 +9,7 @@ import {
   useNodesState,
   useEdgesState,
   type Connection,
+  type NodeMouseHandler,
   type OnConnect,
 } from "@xyflow/react";
 import type { ActionNode, ExtractionRule, WorkflowDefinition } from "@datarover/workflow-types";
@@ -26,6 +27,7 @@ import { useEditorStore } from "../lib/editorStore";
 import { nodeTypes } from "../components/nodes/WorkflowNode";
 import { NodePalette } from "../components/NodePalette";
 import { NodeInspectorPanel } from "../components/NodeInspectorPanel";
+import { NodeContextMenu, type NodeContextMenuState } from "../components/NodeContextMenu";
 
 export function WorkflowEditorPage(): JSX.Element {
   const { projectId, workflowId } = useParams<{ projectId: string; workflowId: string }>();
@@ -40,6 +42,7 @@ export function WorkflowEditorPage(): JSX.Element {
   const [edges, setEdges, onEdgesChangeBase] = useEdgesState<FlowEdge>([]);
   const [workflowName, setWorkflowName] = useState("");
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
+  const [contextMenu, setContextMenu] = useState<NodeContextMenuState | null>(null);
 
   // Guards the initial-population effect below so a background refetch of
   // the same workflow (e.g. react-query's window-focus refetch, or the
@@ -91,6 +94,39 @@ export function WorkflowEditorPage(): JSX.Element {
     setEdges((current) => addEdge(connection, current));
     markDirty();
   };
+
+  const onNodeContextMenu: NodeMouseHandler<FlowNode> = (event, node) => {
+    event.preventDefault();
+    setContextMenu({ nodeId: node.id, x: event.clientX, y: event.clientY });
+  };
+
+  function handleDuplicateNode(nodeId: string): void {
+    const source = nodes.find((flowNode) => flowNode.id === nodeId);
+    if (!source) {
+      return;
+    }
+    const existingIds = new Set(nodes.map((flowNode) => flowNode.id));
+    const newId = generateNodeId(source.data.node.type, existingIds);
+    const clonedNode: ActionNode = { ...source.data.node, id: newId, name: `${source.data.node.name} (copie)` };
+    const flowNode: FlowNode = {
+      id: newId,
+      type: source.type,
+      position: { x: source.position.x + 40, y: source.position.y + 40 },
+      data: { node: clonedNode },
+    };
+    setNodes((current) => [...current, flowNode]);
+    selectNode(newId);
+    markDirty();
+  }
+
+  function handleDeleteNode(nodeId: string): void {
+    setNodes((current) => current.filter((flowNode) => flowNode.id !== nodeId));
+    setEdges((current) => current.filter((edge) => edge.source !== nodeId && edge.target !== nodeId));
+    if (selectedNodeId === nodeId) {
+      selectNode(null);
+    }
+    markDirty();
+  }
 
   const handleNodesChange: typeof onNodesChangeBase = (changes) => {
     onNodesChangeBase(changes);
@@ -231,7 +267,7 @@ export function WorkflowEditorPage(): JSX.Element {
   }
 
   return (
-    <div className="flex h-screen flex-col">
+    <div className="flex h-full flex-col">
       <header className="flex items-center justify-between border-b border-gray-200 bg-white px-4 py-3">
         <div className="flex items-center gap-3">
           <input
@@ -297,11 +333,21 @@ export function WorkflowEditorPage(): JSX.Element {
             onNodesChange={handleNodesChange}
             onEdgesChange={handleEdgesChange}
             onConnect={onConnect}
+            onNodeContextMenu={onNodeContextMenu}
+            onPaneClick={() => setContextMenu(null)}
             fitView
           >
             <Background />
             <Controls />
           </ReactFlow>
+          {contextMenu && (
+            <NodeContextMenu
+              state={contextMenu}
+              onDuplicate={handleDuplicateNode}
+              onDelete={handleDeleteNode}
+              onClose={() => setContextMenu(null)}
+            />
+          )}
         </div>
 
         <NodeInspectorPanel
