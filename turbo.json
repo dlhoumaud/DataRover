@@ -15,7 +15,10 @@
     "WEB_ORIGIN",
     "WORKER_CONCURRENCY",
     "NODE_ENV",
-    "VITE_API_URL"
+    "VITE_API_URL",
+    "E2E_WEB_URL",
+    "E2E_API_URL",
+    "FIREFOX_BIN"
   ],
   "tasks": {
     "build": {
@@ -29,6 +32,9 @@
     "test:watch": {
       "cache": false,
       "persistent": true
+    },
+    "test:e2e": {
+      "cache": false
     },
     "lint": {
       "dependsOn": ["^build"],
