@@ -54,17 +54,27 @@ corepack prepare pnpm@9.15.0 --activate
 cp .env.example .env
 docker compose up -d postgres redis   # ou: pnpm infra:up
 pnpm install                          # génère aussi le client Prisma (postinstall)
-pnpm db:migrate                       # première migration (nomme-la ex. "init")
+pnpm db:migrate                       # première migration + données d'exemple (voir ci-dessous)
 ```
+
+`pnpm db:migrate` crée automatiquement, à la première exécution, un projet d'exemple **"Veille
+e-commerce"** avec deux workflows réalistes et exécutables (surveillance de prix et de qualité
+produit sur une vraie API publique, `fakestoreapi.com`) — pour que l'UI ne s'ouvre jamais sur une
+liste de projets vide. Voir [`packages/database/prisma/seed.ts`](./packages/database/prisma/seed.ts).
 
 Scripts liés à la base de données (voir [`packages/database`](./packages/database)) :
 
 | Commande | Effet |
 |---|---|
 | `pnpm db:generate` | Régénère le client Prisma après une modification du schéma |
-| `pnpm db:migrate` | Crée/applique une migration en dev (`prisma migrate dev`) |
-| `pnpm db:migrate:deploy` | Applique les migrations existantes sans en créer (usage prod/CI) |
+| `pnpm db:migrate` | Crée/applique une migration en dev (`prisma migrate dev`), **puis lance le seed** |
+| `pnpm db:migrate:deploy` | Applique les migrations existantes sans en créer (usage prod/CI) — **ne seed jamais** |
+| `pnpm db:seed` | Relance juste le seed (idempotent — sûr à rejouer, ne duplique/n'écrase rien) |
 | `pnpm db:studio` | Ouvre Prisma Studio (explorateur de données) |
+
+> Le seed utilise des id fixes (`seed-*`) et un `upsert` : le rejouer (ce que fait aussi chaque
+> `pnpm db:migrate`) ne crée jamais de doublon et ne réécrase pas les modifications que vous auriez
+> faites sur ce projet depuis l'UI.
 
 > **Un seul `.env`, à la racine.** Les scripts `dev`/`start`/`test` d'`apps/api`, `apps/worker` et
 > les scripts Prisma de `packages/database` le chargent automatiquement via `dotenv-cli`

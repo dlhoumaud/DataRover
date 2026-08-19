@@ -246,6 +246,9 @@ importers:
 
   packages/database:
     dependencies:
+      '@datarover/workflow-types':
+        specifier: workspace:*
+        version: link:../workflow-types
       '@prisma/client':
         specifier: ^5.22.0
         version: 5.22.0(prisma@5.22.0)
@@ -262,6 +265,9 @@ importers:
       tsup:
         specifier: ^8.3.5
         version: 8.5.1(@swc/core@1.16.0)(jiti@1.21.7)(postcss@8.5.26)(tsx@4.23.12)(typescript@5.9.3)
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.12
       typescript:
         specifier: ^5.6.3
         version: 5.9.3

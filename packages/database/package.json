@@ -15,9 +15,10 @@
   },
   "scripts": {
     "generate": "prisma generate",
-    "migrate:dev": "dotenv -e ../../.env -- prisma migrate dev",
+    "migrate:dev": "dotenv -e ../../.env -- prisma migrate dev && pnpm run seed",
     "migrate:deploy": "dotenv -e ../../.env -- prisma migrate deploy",
     "studio": "dotenv -e ../../.env -- prisma studio",
+    "seed": "dotenv -e ../../.env -- prisma db seed",
     "build": "prisma generate && tsup",
     "dev": "tsup --watch",
     "test": "vitest run --passWithNoTests",
@@ -27,7 +28,11 @@
     "clean": "rimraf dist .turbo",
     "postinstall": "prisma generate"
   },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
   "dependencies": {
+    "@datarover/workflow-types": "workspace:*",
     "@prisma/client": "^5.22.0"
   },
   "devDependencies": {
@@ -35,6 +40,7 @@
     "dotenv-cli": "^11.0.0",
     "prisma": "^5.22.0",
     "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
     "typescript": "^5.6.3",
     "vitest": "^2.1.5"
   }

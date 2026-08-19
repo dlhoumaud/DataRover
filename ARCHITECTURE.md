@@ -167,6 +167,23 @@ soit exactement la limite de concurrence par défaut de Turborepo (10) — `turb
 **Vérifié** : `pnpm dev` et `pnpm test` passent tous les deux sur un état complètement neuf
 (`dist/` et cache Turborepo supprimés, `.env` jamais sourcé manuellement dans le shell).
 
+### Données d'exemple au premier lancement (`packages/database/prisma/seed.ts`)
+
+`pnpm db:migrate` (première migration en dev) crée maintenant automatiquement un projet
+d'exemple **"Veille e-commerce"** avec deux workflows réalistes et directement exécutables
+(`http` → `extract` → `setVariable` → `condition` → `stop`×2), ciblant une vraie API publique
+stable (`fakestoreapi.com`) plutôt qu'un fixture local — l'exemple reste utilisable même après la
+fin d'une session de développement.
+
+Point technique notable : `prisma migrate dev` n'a **pas** déclenché le hook de seed automatique
+de Prisma lors du test (base de données neuve, migrations déjà présentes dans le dépôt à
+appliquer) — seul `prisma migrate reset --force` le fait de façon fiable dans cette version de
+Prisma. Plutôt que de dépendre de cette heuristique interne, `migrate:dev` chaîne explicitement
+`prisma migrate dev && pnpm run seed` dans `packages/database/package.json`. Le seed est idempotent
+(id fixes préfixés `seed-`, `upsert` avec `update: {}`) : le rejouer à chaque `pnpm db:migrate` ne
+crée jamais de doublon et ne réécrase jamais une modification faite depuis l'UI. `migrate:deploy`
+(usage prod/CI) n'appelle jamais le seed.
+
 ## Explicitement hors périmètre à ce stade
 
 - **Preview HTML + sélection visuelle** de sélecteurs (§6).
