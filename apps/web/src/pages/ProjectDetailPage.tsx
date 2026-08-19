@@ -1,8 +1,8 @@
 import { type FormEvent, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { ApiError } from "../api/client";
-import { useProject, useUpdateProject } from "../api/projects";
-import { useCreateWorkflow, useWorkflows } from "../api/workflows";
+import { useDeleteProject, useProject, useUpdateProject } from "../api/projects";
+import { useCreateWorkflow, useDeleteWorkflow, useWorkflows } from "../api/workflows";
 import { ProjectForm } from "../components/ProjectForm";
 import { createDefaultNode } from "../lib/workflowGraph";
 
@@ -13,7 +13,9 @@ export function ProjectDetailPage(): JSX.Element {
   const projectQuery = useProject(projectId);
   const workflowsQuery = useWorkflows(projectId);
   const updateProject = useUpdateProject(safeProjectId);
+  const deleteProject = useDeleteProject();
   const createWorkflow = useCreateWorkflow(safeProjectId);
+  const deleteWorkflow = useDeleteWorkflow(safeProjectId);
   const navigate = useNavigate();
 
   const [isEditing, setIsEditing] = useState(false);
@@ -54,6 +56,27 @@ export function ProjectDetailPage(): JSX.Element {
         },
       },
     );
+  }
+
+  function handleDeleteProject(): void {
+    if (!projectQuery.data) {
+      return;
+    }
+    const confirmed = window.confirm(
+      `Supprimer le projet "${projectQuery.data.name}" ? Tous ses workflows et son historique d'exécutions seront supprimés définitivement.`,
+    );
+    if (confirmed) {
+      deleteProject.mutate(safeProjectId, { onSuccess: () => navigate("/") });
+    }
+  }
+
+  function handleDeleteWorkflow(id: string, name: string): void {
+    const confirmed = window.confirm(
+      `Supprimer le workflow "${name}" ? Son historique d'exécutions sera supprimé définitivement.`,
+    );
+    if (confirmed) {
+      deleteWorkflow.mutate(id);
+    }
   }
 
   if (!projectId) {
@@ -121,15 +144,33 @@ export function ProjectDetailPage(): JSX.Element {
                   {JSON.stringify(projectQuery.data.variables, null, 2)}
                 </pre>
               </div>
-              <button
-                type="button"
-                onClick={() => setIsEditing(true)}
-                className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
-              >
-                Modifier
-              </button>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsEditing(true)}
+                  className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                >
+                  Modifier
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDeleteProject}
+                  disabled={deleteProject.isPending}
+                  className="rounded-md border border-red-300 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
+                >
+                  Supprimer le projet
+                </button>
+              </div>
             </div>
           )
+        ) : null}
+
+        {deleteProject.isError ? (
+          <p className="mt-3 text-sm text-red-600">
+            {deleteProject.error instanceof ApiError
+              ? deleteProject.error.message
+              : "Une erreur est survenue lors de la suppression du projet."}
+          </p>
         ) : null}
       </section>
 
@@ -209,11 +250,27 @@ export function ProjectDetailPage(): JSX.Element {
                     >
                       Historique
                     </Link>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteWorkflow(workflow.id, workflow.name)}
+                      disabled={deleteWorkflow.isPending}
+                      className="text-red-600 hover:underline disabled:opacity-50"
+                    >
+                      Supprimer
+                    </button>
                   </div>
                 </li>
               ))}
             </ul>
           )
+        ) : null}
+
+        {deleteWorkflow.isError ? (
+          <p className="text-sm text-red-600">
+            {deleteWorkflow.error instanceof ApiError
+              ? deleteWorkflow.error.message
+              : "Une erreur est survenue lors de la suppression du workflow."}
+          </p>
         ) : null}
       </section>
     </div>
