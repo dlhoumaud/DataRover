@@ -12,11 +12,12 @@ réel d'avancement (ce qui est implémenté vs le reste de la vision) est docume
 
 ## État actuel
 
-Trois itérations livrées : le **moteur de workflow** (packages TypeScript purs), un **backend
-exécutable** (API NestJS + PostgreSQL + worker BullMQ), et une **UI React minimale** (éditeur
-visuel React Flow) branchée dessus. Pas encore de preview HTML/sélection visuelle, de scheduler
-exécutable, de Docker complet ni d'Electron (voir [`ARCHITECTURE.md`](./ARCHITECTURE.md) pour le
-détail et la feuille de route).
+Quatre itérations livrées : le **moteur de workflow** (packages TypeScript purs), un **backend
+exécutable** (API NestJS + PostgreSQL + worker BullMQ), une **UI React** (éditeur visuel React
+Flow) branchée dessus, et l'outil de **preview HTML + sélection visuelle d'éléments** (cliquer un
+élément dans un aperçu sandboxé de la page cible pour générer un node d'extraction). Pas encore de
+scheduler exécutable, de Docker complet ni d'Electron (voir
+[`ARCHITECTURE.md`](./ARCHITECTURE.md) pour le détail et la feuille de route).
 
 ```text
 packages/
@@ -206,19 +207,28 @@ pnpm --filter @datarover/web test:watch
 ```
 
 Couvre aujourd'hui la logique dont dépend l'interface : l'aller-retour
-`WorkflowDefinition ⇄ nodes/edges React Flow` (`src/lib/workflowGraph.ts`) et le client HTTP
-(`src/api/client.ts` — gestion des erreurs, statut 204, en-têtes conditionnels). Ces tests ne
-lancent pas de navigateur ; l'infrastructure (`jsdom`, `@testing-library/react` déjà en
-devDependencies) est prête pour des tests de rendu de composants au fur et à mesure qu'ils seront
-ajoutés.
+`WorkflowDefinition ⇄ nodes/edges React Flow` (`src/lib/workflowGraph.ts`), le client HTTP
+(`src/api/client.ts` — gestion des erreurs, statut 204, en-têtes conditionnels), et le nettoyage
+`DOMParser` de l'outil de preview HTML (`src/lib/htmlSandbox.ts` — retrait effectif des
+`<script>`/attributs d'événement/URLs `javascript:`, injection du `<base>`). Ces tests ne lancent
+pas de navigateur (jsdom suffit, y compris pour `DOMParser`) ; l'infrastructure
+(`@testing-library/react` déjà en devDependencies) est prête pour des tests de rendu de composants
+au fur et à mesure qu'ils seront ajoutés.
 
 ### Tests e2e navigateur (`apps/web/e2e`)
 
 Rejoue dans un **vrai navigateur** (Firefox headless, piloté via `selenium-webdriver` +
-`geckodriver`) le même parcours que la vérification manuelle de l'itération 3 : créer un projet →
-créer un workflow → ajouter un node HTTP via la palette → l'éditer dans l'inspecteur → enregistrer
-→ exécuter → attendre que l'exécution passe à un statut final et vérifier que la page affiche
-"Succès" et son journal.
+`geckodriver`) deux parcours :
+
+- `workflow.e2e.test.ts` — celui de la vérification manuelle de l'itération 3 : créer un projet →
+  créer un workflow → ajouter un node HTTP via la palette → l'éditer dans l'inspecteur →
+  enregistrer → exécuter → attendre que l'exécution passe à un statut final et vérifier que la
+  page affiche "Succès" et son journal.
+- `htmlPreview.e2e.test.ts` — celui de l'itération 4 (preview HTML + sélection visuelle, §6/§8) :
+  pointer un node HTTP vers un serveur de fixture local, ouvrir l'aperçu, **basculer le contexte
+  WebDriver dans l'iframe sandboxée** pour cliquer un vrai élément, vérifier que les sélecteurs
+  candidats affichés correspondent à l'exemple du cahier des charges, valider la règle, et
+  confirmer qu'un node `extract` relié apparaît dans le canvas.
 
 Firefox plutôt que Chromium/Playwright : le Chromium embarqué par Playwright nécessite des
 bibliothèques système installées via `sudo apt-get`, indisponible sur certaines machines de dev de

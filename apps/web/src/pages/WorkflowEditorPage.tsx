@@ -11,7 +11,7 @@ import {
   type Connection,
   type OnConnect,
 } from "@xyflow/react";
-import type { ActionNode, WorkflowDefinition } from "@datarover/workflow-types";
+import type { ActionNode, ExtractionRule, WorkflowDefinition } from "@datarover/workflow-types";
 import { useWorkflow, useUpdateWorkflow, useDeleteWorkflow } from "../api/workflows";
 import { useCreateExecution } from "../api/executions";
 import {
@@ -111,6 +111,43 @@ export function WorkflowEditorPage(): JSX.Element {
     () => nodes.filter((flowNode) => flowNode.id !== selectedNodeId).map((flowNode) => flowNode.id),
     [nodes, selectedNodeId],
   );
+
+  /**
+   * Turns the rules validated in HtmlPreviewSelector (Specs.md §6/§8) into
+   * a new `extract` node wired by an edge from the http node that was
+   * being previewed, and selects it — mirrors handleAddNode's id
+   * generation / positioning conventions.
+   */
+  function handleCreateExtractNode(rules: ExtractionRule[]): void {
+    if (!selectedNodeId) {
+      return;
+    }
+    const sourceNode = nodes.find((flowNode) => flowNode.id === selectedNodeId);
+    if (!sourceNode) {
+      return;
+    }
+    const existingIds = new Set(nodes.map((flowNode) => flowNode.id));
+    const id = generateNodeId("extract", existingIds);
+    const newNode: ActionNode = {
+      id,
+      name: "New Extraction",
+      type: "extract",
+      source: selectedNodeId,
+      sourceType: "html",
+      rules,
+    };
+    const position = { x: sourceNode.position.x + 260, y: sourceNode.position.y };
+    const flowNode: FlowNode = { id, type: "extract", position, data: { node: newNode } };
+    const newEdge: FlowEdge = {
+      id: `${selectedNodeId}-${id}-default`,
+      source: selectedNodeId,
+      target: id,
+    };
+    setNodes((current) => [...current, flowNode]);
+    setEdges((current) => [...current, newEdge]);
+    selectNode(id);
+    markDirty();
+  }
 
   function handleInspectorChange(updated: ActionNode): void {
     setNodes((current) =>
@@ -270,8 +307,10 @@ export function WorkflowEditorPage(): JSX.Element {
         <NodeInspectorPanel
           node={selectedFlowNode ? selectedFlowNode.data.node : null}
           availableNodeIds={availableNodeIds}
+          projectId={projectId ?? ""}
           onChange={handleInspectorChange}
           onClose={() => selectNode(null)}
+          onCreateExtractNode={handleCreateExtractNode}
         />
       </div>
     </div>

@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { useForm, useFieldArray, useWatch, type Path } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { HttpNodeSchema, type HttpNode } from "@datarover/workflow-types";
+import { HttpNodeSchema, type ExtractionRule, type HttpNode } from "@datarover/workflow-types";
+import { HtmlPreviewSelector } from "../HtmlPreviewSelector";
 
 /**
  * Form schema derived from `HttpNodeSchema`: the scalar fields (name,
@@ -51,9 +52,19 @@ function pairsToRecord(pairs: Array<{ key: string; value: string }>): Record<str
 export function HttpNodeInspector({
   node,
   onChange,
+  projectId,
+  onCreateExtractNode,
 }: {
   node: HttpNode;
   onChange: (updated: HttpNode) => void;
+  /** Needed to interpolate the preview URL against the project's global variables (Specs.md §6). */
+  projectId: string;
+  /**
+   * Invoked with the accumulated rules once the user validates the preview
+   * & selection tool ("Terminer") — the caller (WorkflowEditorPage) turns
+   * this into a new `extract` node wired to this http node.
+   */
+  onCreateExtractNode: (rules: ExtractionRule[]) => void;
 }): JSX.Element {
   const nodeRef = useRef(node);
   nodeRef.current = node;
@@ -61,6 +72,7 @@ export function HttpNodeInspector({
   onChangeRef.current = onChange;
   const lastSentRef = useRef<string | null>(null);
   const [bodyError, setBodyError] = useState<string | null>(null);
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
 
   const {
     register,
@@ -191,6 +203,34 @@ export function HttpNodeInspector({
         />
         {errors.url && <p className="mt-1 text-xs text-red-600">{errors.url.message}</p>}
       </div>
+
+      {node.responseType === "html" && node.url.trim().length > 0 && (
+        <div>
+          <button
+            type="button"
+            onClick={() => setIsPreviewOpen(true)}
+            className="w-full rounded-md border border-indigo-300 bg-indigo-50 px-3 py-1.5 text-sm font-medium text-indigo-700 hover:bg-indigo-100"
+          >
+            Prévisualiser &amp; sélectionner un élément
+          </button>
+        </div>
+      )}
+
+      {isPreviewOpen && (
+        <HtmlPreviewSelector
+          projectId={projectId}
+          method={node.method}
+          url={node.url}
+          headers={node.headers}
+          queryParams={node.queryParams}
+          body={node.body}
+          onClose={() => setIsPreviewOpen(false)}
+          onValidate={(rules) => {
+            onCreateExtractNode(rules);
+            setIsPreviewOpen(false);
+          }}
+        />
+      )}
 
       <div>
         <div className="flex items-center justify-between">
