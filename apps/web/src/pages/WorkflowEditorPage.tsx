@@ -12,7 +12,7 @@ import {
   type OnConnect,
 } from "@xyflow/react";
 import type { ActionNode, WorkflowDefinition } from "@datarover/workflow-types";
-import { useWorkflow, useUpdateWorkflow } from "../api/workflows";
+import { useWorkflow, useUpdateWorkflow, useDeleteWorkflow } from "../api/workflows";
 import { useCreateExecution } from "../api/executions";
 import {
   definitionToFlow,
@@ -33,6 +33,7 @@ export function WorkflowEditorPage(): JSX.Element {
 
   const { data: workflow, isLoading, isError, error } = useWorkflow(workflowId);
   const updateWorkflow = useUpdateWorkflow(workflowId ?? "");
+  const deleteWorkflow = useDeleteWorkflow(projectId ?? "");
   const createExecution = useCreateExecution();
 
   const [nodes, setNodes, onNodesChangeBase] = useNodesState<FlowNode>([]);
@@ -151,6 +152,20 @@ export function WorkflowEditorPage(): JSX.Element {
     markClean();
   }
 
+  function handleDelete(): void {
+    if (!workflowId) {
+      return;
+    }
+    const confirmed = window.confirm(
+      `Supprimer le workflow "${workflowName}" ? Son historique d'exécutions sera supprimé définitivement.`,
+    );
+    if (confirmed) {
+      deleteWorkflow.mutate(workflowId, {
+        onSuccess: () => navigate(`/projects/${projectId ?? ""}`),
+      });
+    }
+  }
+
   async function handleRun(): Promise<void> {
     if (!workflowId) {
       return;
@@ -217,8 +232,22 @@ export function WorkflowEditorPage(): JSX.Element {
           >
             Exécuter
           </button>
+          <button
+            type="button"
+            onClick={handleDelete}
+            disabled={deleteWorkflow.isPending}
+            className="rounded-md border border-red-300 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
+          >
+            Supprimer
+          </button>
         </div>
       </header>
+
+      {deleteWorkflow.isError ? (
+        <p className="border-b border-gray-200 bg-white px-4 py-2 text-sm text-red-600">
+          Une erreur est survenue lors de la suppression du workflow.
+        </p>
+      ) : null}
 
       <NodePalette onAddNode={handleAddNode} />
 

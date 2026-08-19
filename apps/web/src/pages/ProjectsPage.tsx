@@ -1,13 +1,14 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ApiError } from "../api/client";
-import { useCreateProject, useProjects } from "../api/projects";
+import { useCreateProject, useDeleteProject, useProjects } from "../api/projects";
 import { ProjectForm } from "../components/ProjectForm";
 
 export function ProjectsPage(): JSX.Element {
   const { data: projects, isPending, isError, error } = useProjects();
   const [isCreating, setIsCreating] = useState(false);
   const createProject = useCreateProject();
+  const deleteProject = useDeleteProject();
   const navigate = useNavigate();
 
   function handleCreate(values: { name: string; description?: string; variables: Record<string, unknown> }): void {
@@ -17,6 +18,15 @@ export function ProjectsPage(): JSX.Element {
         navigate(`/projects/${project.id}`);
       },
     });
+  }
+
+  function handleDelete(id: string, name: string): void {
+    const confirmed = window.confirm(
+      `Supprimer le projet "${name}" ? Tous ses workflows et son historique d'exécutions seront supprimés définitivement.`,
+    );
+    if (confirmed) {
+      deleteProject.mutate(id);
+    }
   }
 
   return (
@@ -60,21 +70,37 @@ export function ProjectsPage(): JSX.Element {
         ) : (
           <ul className="grid gap-4 sm:grid-cols-2">
             {projects.map((project) => (
-              <li key={project.id}>
-                <Link
-                  to={`/projects/${project.id}`}
-                  className="block h-full rounded-lg border border-gray-200 bg-white p-4 shadow-sm transition hover:border-blue-300 hover:shadow"
-                >
+              <li
+                key={project.id}
+                className="relative rounded-lg border border-gray-200 bg-white p-4 shadow-sm transition hover:border-blue-300 hover:shadow"
+              >
+                <Link to={`/projects/${project.id}`} className="block pr-16">
                   <h2 className="text-lg font-medium text-gray-900">{project.name}</h2>
                   {project.description ? <p className="mt-1 text-sm text-gray-600">{project.description}</p> : null}
                   <p className="mt-2 text-xs text-gray-400">
                     Créé le {new Date(project.createdAt).toLocaleDateString()}
                   </p>
                 </Link>
+                <button
+                  type="button"
+                  onClick={() => handleDelete(project.id, project.name)}
+                  disabled={deleteProject.isPending}
+                  className="absolute right-4 top-4 text-sm text-red-600 hover:underline disabled:opacity-50"
+                >
+                  Supprimer
+                </button>
               </li>
             ))}
           </ul>
         )
+      ) : null}
+
+      {deleteProject.isError ? (
+        <p className="text-sm text-red-600">
+          {deleteProject.error instanceof ApiError
+            ? deleteProject.error.message
+            : "Une erreur est survenue lors de la suppression du projet."}
+        </p>
       ) : null}
     </div>
   );
