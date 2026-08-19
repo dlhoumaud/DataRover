@@ -4,6 +4,9 @@ import { usePreviewHtml, useTestSelector } from "../api/tools";
 import { buildSandboxedDocument, isElementSelectedMessage } from "../lib/htmlSandbox";
 import type { SelectorScoreDto } from "../api/types";
 
+/** Waited out after every keystroke in a candidate field before re-testing it against the API. */
+const EDIT_DEBOUNCE_MS = 400;
+
 /**
  * The "Prévisualiser & sélectionner" tool (Specs.md §6/§8): fetches the
  * target http node's page, renders it in a sandboxed iframe (see
@@ -11,6 +14,15 @@ import type { SelectorScoreDto } from "../api/types";
  * ever runs), lets the user click an element to get scored selector
  * candidates, and accumulates validated rules into one or more extraction
  * rules the caller turns into an `extract` node.
+ *
+ * Candidate selectors are auto-computed client-side from the clicked
+ * element (id, data-*, class, ...) but are always shown as **editable**
+ * text fields, not read-only choices: on some real sites (generic markup —
+ * a plain `<div>` with no id/class/data-* to anchor on, common on pages
+ * that don't bother with semantic tags) the auto-computed fallback can miss
+ * or mismatch once the same page is re-parsed by the backend's extractor,
+ * so the user can hand-fix or add a selector and immediately see it
+ * re-scored and re-tested rather than being stuck with a dead end.
  */
 export function HtmlPreviewSelector({
   projectId,
@@ -34,22 +46,39 @@ export function HtmlPreviewSelector({
   const preview = usePreviewHtml();
   const testSelector = useTestSelector();
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [accumulatedRules, setAccumulatedRules] = useState<ExtractionRule[]>([]);
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [candidates, setCandidates] = useState<string[]>([]);
-  const [activeSelector, setActiveSelector] = useState<string | null>(null);
   const [ruleName, setRuleName] = useState("");
   const [output, setOutput] = useState<ExtractOutputType>("text");
   const [attribute, setAttribute] = useState("");
+  // Off by default (fast path — a plain fetch): only meaningful for targets whose real content
+  // only exists after client-side JS runs (a SPA shell with no server-rendered markup — verified
+  // against a real reported page with no <h1> anywhere in its plain-fetched HTML). Toggling it
+  // re-fetches via a real headless browser server-side instead (BrowserRendererService) — slower,
+  // and GET-only, so it's an explicit opt-in rather than the default for every preview.
+  const [render, setRender] = useState(false);
 
   useEffect(() => {
-    preview.mutate({ projectId, method, url, headers, queryParams, body });
-    // Intentionally re-runs only when the http node's own request shape
-    // changes, not on every re-render (preview/testSelector are mutation
-    // objects that change identity each render).
+    preview.mutate({ projectId, method, url, headers, queryParams, body, render });
+    setSelectedTag(null);
+    setCandidates([]);
+    // Intentionally re-runs only when the http node's own request shape (or the render toggle)
+    // changes, not on every re-render (preview/testSelector are mutation objects that change
+    // identity each render).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, method, url, headers, queryParams, body]);
+  }, [projectId, method, url, headers, queryParams, body, render]);
+
+  useEffect(
+    () => () => {
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+      }
+    },
+    [],
+  );
 
   const sandboxedDocument = useMemo(() => {
     if (!preview.data) {
@@ -57,6 +86,46 @@ export function HtmlPreviewSelector({
     }
     return buildSandboxedDocument(preview.data.html, preview.data.url);
   }, [preview.data]);
+
+  /**
+   * Tests every non-empty candidate together in one call — the backend
+   * (`extractWithCss`) reports a score for each and picks the first one
+   * that actually matches, so "Aperçu du résultat" stays correct even
+   * while the user is mid-edit on some other, currently-broken row.
+   * `outputOverride`/`attributeOverride` let callers pass a not-yet-committed
+   * value (e.g. from the very `onChange` that's about to call `setOutput`)
+   * without waiting for a re-render.
+   */
+  function runSelectorTest(
+    selectors: string[],
+    outputOverride?: ExtractOutputType,
+    attributeOverride?: string,
+  ): void {
+    if (!preview.data) {
+      return;
+    }
+    const nonEmpty = selectors.map((selector) => selector.trim()).filter((selector) => selector.length > 0);
+    if (nonEmpty.length === 0) {
+      return;
+    }
+    const effectiveOutput = outputOverride ?? output;
+    const effectiveAttribute = attributeOverride ?? attribute;
+    testSelector.mutate({
+      html: preview.data.html,
+      selectors: nonEmpty,
+      output: effectiveOutput,
+      attribute: effectiveOutput === "attribute" ? effectiveAttribute : undefined,
+    });
+  }
+
+  function scheduleSelectorTest(selectors: string[], attributeOverride?: string): void {
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+    }
+    debounceRef.current = setTimeout(() => {
+      runSelectorTest(selectors, undefined, attributeOverride);
+    }, EDIT_DEBOUNCE_MS);
+  }
 
   useEffect(() => {
     function handleMessage(event: MessageEvent): void {
@@ -66,74 +135,45 @@ export function HtmlPreviewSelector({
       if (!isElementSelectedMessage(event.data)) {
         return;
       }
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+      }
       setSelectedTag(event.data.tagName);
       setCandidates(event.data.selectors);
-      setActiveSelector(event.data.selectors[0] ?? null);
       setRuleName((current) => (current.length > 0 ? current : event.data.tagName));
-      if (!preview.data) {
-        return;
-      }
-      testSelector.mutate({
-        html: preview.data.html,
-        selectors: event.data.selectors,
-        output,
-        attribute: output === "attribute" ? attribute : undefined,
-      });
+      runSelectorTest(event.data.selectors);
     }
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preview.data, output, attribute]);
 
-  function handleSelectCandidate(selector: string): void {
-    setActiveSelector(selector);
-    if (!preview.data) {
-      return;
-    }
-    testSelector.mutate({
-      html: preview.data.html,
-      selectors: [selector],
-      output,
-      attribute: output === "attribute" ? attribute : undefined,
-    });
+  function handleCandidateChange(index: number, value: string): void {
+    const updated = candidates.map((candidate, i) => (i === index ? value : candidate));
+    setCandidates(updated);
+    scheduleSelectorTest(updated);
+  }
+
+  function handleAddCandidate(): void {
+    setCandidates((current) => [...current, ""]);
+  }
+
+  function handleRemoveCandidate(index: number): void {
+    const updated = candidates.filter((_, i) => i !== index);
+    setCandidates(updated);
+    runSelectorTest(updated);
   }
 
   function handleOutputChange(next: ExtractOutputType): void {
     setOutput(next);
-    if (!preview.data || !activeSelector) {
-      return;
-    }
-    testSelector.mutate({
-      html: preview.data.html,
-      selectors: [activeSelector],
-      output: next,
-      attribute: next === "attribute" ? attribute : undefined,
-    });
+    runSelectorTest(candidates, next);
   }
 
-  function handleAddRule(): void {
-    if (!activeSelector || ruleName.trim().length === 0) {
-      return;
+  function handleAttributeChange(value: string): void {
+    setAttribute(value);
+    if (output === "attribute") {
+      scheduleSelectorTest(candidates, value);
     }
-    const rule: ExtractionRule = {
-      name: ruleName.trim(),
-      strategy: "css",
-      selectors: [activeSelector],
-      output,
-      attribute: output === "attribute" && attribute.trim().length > 0 ? attribute.trim() : undefined,
-    };
-    setAccumulatedRules((current) => [...current, rule]);
-    setSelectedTag(null);
-    setCandidates([]);
-    setActiveSelector(null);
-    setRuleName("");
-  }
-
-  function handleFinish(): void {
-    if (accumulatedRules.length === 0) {
-      return;
-    }
-    onValidate(accumulatedRules);
   }
 
   const scoreBySelector = useMemo(() => {
@@ -143,6 +183,41 @@ export function HtmlPreviewSelector({
     }
     return map;
   }, [testSelector.data]);
+
+  const matchedSelector = testSelector.data?.matchedSelector;
+
+  function handleAddRule(): void {
+    if (!matchedSelector || ruleName.trim().length === 0) {
+      return;
+    }
+    // Every currently-working candidate becomes part of the rule's fallback chain (that's what
+    // ExtractionRule.selectors is for), ordered best-scored first — not just the one selector
+    // that happened to match first in submission order.
+    const working = Array.from(
+      new Set(candidates.map((candidate) => candidate.trim()).filter((candidate) => candidate.length > 0)),
+    ).filter((candidate) => scoreBySelector.get(candidate)?.matched);
+    const ordered = working.sort(
+      (a, b) => (scoreBySelector.get(b)?.score ?? 0) - (scoreBySelector.get(a)?.score ?? 0),
+    );
+    const rule: ExtractionRule = {
+      name: ruleName.trim(),
+      strategy: "css",
+      selectors: ordered.length > 0 ? ordered : [matchedSelector],
+      output,
+      attribute: output === "attribute" && attribute.trim().length > 0 ? attribute.trim() : undefined,
+    };
+    setAccumulatedRules((current) => [...current, rule]);
+    setSelectedTag(null);
+    setCandidates([]);
+    setRuleName("");
+  }
+
+  function handleFinish(): void {
+    if (accumulatedRules.length === 0) {
+      return;
+    }
+    onValidate(accumulatedRules);
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-2">
@@ -154,9 +229,27 @@ export function HtmlPreviewSelector({
               <span className="truncate text-xs text-gray-400">{preview.data.url}</span>
             )}
           </div>
+          <div className="flex items-center gap-2 border-b border-gray-200 bg-gray-50 px-4 py-1.5">
+            <label className="flex items-center gap-1.5 text-xs text-gray-700">
+              <input
+                type="checkbox"
+                checked={render}
+                onChange={(event) => setRender(event.target.checked)}
+              />
+              Rendu JavaScript (pages React/Vue…)
+            </label>
+            <span className="text-xs text-gray-400">
+              — plus lent (navigateur headless côté serveur), pour les pages dont le contenu
+              n&apos;existe qu&apos;après exécution du script.
+            </span>
+          </div>
           <div className="flex-1 overflow-auto bg-gray-50">
             {preview.isPending && (
-              <p className="p-4 text-sm text-gray-500">Chargement de la page…</p>
+              <p className="p-4 text-sm text-gray-500">
+                {render
+                  ? "Rendu de la page dans un navigateur headless… (jusqu'à 20 secondes)"
+                  : "Chargement de la page…"}
+              </p>
             )}
             {preview.isError && (
               <p className="p-4 text-sm text-red-600">
@@ -214,28 +307,39 @@ export function HtmlPreviewSelector({
                 </p>
 
                 <div>
-                  <p className="mb-1 text-xs font-semibold uppercase text-gray-500">
-                    Sélecteurs candidats
+                  <div className="mb-1 flex items-center justify-between">
+                    <p className="text-xs font-semibold uppercase text-gray-500">Sélecteurs candidats</p>
+                    <button
+                      type="button"
+                      onClick={handleAddCandidate}
+                      className="text-xs font-medium text-indigo-600 hover:text-indigo-800"
+                    >
+                      + ajouter
+                    </button>
+                  </div>
+                  <p className="mb-1 text-xs text-gray-400">
+                    Éditables : corrigez ou complétez un sélecteur pour le re-tester automatiquement.
                   </p>
                   <div className="space-y-1">
-                    {candidates.map((candidate) => {
+                    {candidates.map((candidate, index) => {
                       const score = scoreBySelector.get(candidate);
-                      const isActive = candidate === activeSelector;
+                      const isMatched = candidate.trim().length > 0 && candidate === matchedSelector;
                       return (
-                        <button
-                          key={candidate}
-                          type="button"
-                          onClick={() => handleSelectCandidate(candidate)}
-                          className={`flex w-full items-center justify-between rounded-md border px-2 py-1.5 text-left text-xs ${
-                            isActive
-                              ? "border-indigo-400 bg-indigo-50"
-                              : "border-gray-200 bg-white hover:bg-gray-50"
+                        <div
+                          key={index}
+                          className={`flex items-center gap-1.5 rounded-md border px-2 py-1 ${
+                            isMatched ? "border-indigo-400 bg-indigo-50" : "border-gray-200 bg-white"
                           }`}
                         >
-                          <span className="truncate font-mono">{candidate}</span>
+                          <input
+                            value={candidate}
+                            onChange={(event) => handleCandidateChange(index, event.target.value)}
+                            placeholder="sélecteur CSS"
+                            className="min-w-0 flex-1 bg-transparent font-mono text-xs focus:outline-none"
+                          />
                           {score && (
                             <span
-                              className={`ml-2 flex-shrink-0 rounded px-1.5 py-0.5 text-xs font-semibold ${
+                              className={`flex-shrink-0 rounded px-1.5 py-0.5 text-xs font-semibold ${
                                 score.matched
                                   ? score.score >= 70
                                     ? "bg-green-100 text-green-700"
@@ -246,7 +350,17 @@ export function HtmlPreviewSelector({
                               {score.matched ? score.score : "✕"}
                             </span>
                           )}
-                        </button>
+                          {candidates.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveCandidate(index)}
+                              className="flex-shrink-0 text-xs text-gray-400 hover:text-red-600"
+                              aria-label="Supprimer ce sélecteur"
+                            >
+                              ✕
+                            </button>
+                          )}
+                        </div>
                       );
                     })}
                   </div>
@@ -272,7 +386,7 @@ export function HtmlPreviewSelector({
                       <label className="block text-xs font-medium text-gray-700">Attribut</label>
                       <input
                         value={attribute}
-                        onChange={(event) => setAttribute(event.target.value)}
+                        onChange={(event) => handleAttributeChange(event.target.value)}
                         placeholder="href, src, ..."
                         className="mt-1 w-full rounded-md border border-gray-300 px-2 py-1 text-sm"
                       />
@@ -289,21 +403,25 @@ export function HtmlPreviewSelector({
                   />
                 </div>
 
-                {activeSelector && testSelector.data && (
-                  <div>
-                    <p className="mb-1 text-xs font-semibold uppercase text-gray-500">
-                      Aperçu du résultat
-                    </p>
+                <div>
+                  <p className="mb-1 text-xs font-semibold uppercase text-gray-500">Aperçu du résultat</p>
+                  {matchedSelector ? (
                     <pre className="max-h-24 overflow-auto rounded-md bg-gray-900 p-2 text-xs text-gray-100">
-                      {JSON.stringify(testSelector.data.value, null, 2)}
+                      {JSON.stringify(testSelector.data?.value, null, 2)}
                     </pre>
-                  </div>
-                )}
+                  ) : (
+                    <p className="rounded-md bg-gray-100 p-2 text-xs text-gray-500">
+                      {testSelector.isPending
+                        ? "Test en cours…"
+                        : "Aucun sélecteur ne correspond encore — éditez-en un ci-dessus."}
+                    </p>
+                  )}
+                </div>
 
                 <button
                   type="button"
                   onClick={handleAddRule}
-                  disabled={!activeSelector || ruleName.trim().length === 0}
+                  disabled={!matchedSelector || ruleName.trim().length === 0}
                   className="w-full rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
                 >
                   Ajouter cette règle

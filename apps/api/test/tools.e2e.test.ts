@@ -53,6 +53,35 @@ describe("Tools", () => {
         res.end(FIXTURE_PNG);
         return;
       }
+      if (req.url === "/consent") {
+        // Simulates a full-screen cookie-consent overlay blocking real content underneath —
+        // exactly what a real render of a reported site showed via screenshot. The "accept"
+        // button removes the overlay itself (a plain inline handler is enough for the test; the
+        // real dismissConsentBanner logic finds it via its French accept-like text either way).
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(
+          `<!doctype html><html><body>` +
+            `<div id="overlay">Ce site utilise des cookies.` +
+            `<button onclick="document.getElementById('overlay').remove()">Tout accepter</button></div>` +
+            `<div id="real-content">Contenu reel du produit</div>` +
+            `</body></html>`,
+        );
+        return;
+      }
+      if (req.url === "/spa") {
+        // Simulates a client-rendered SPA: the real content only exists after this inline
+        // script runs — a plain fetch never sees it, only a real render (render: true) does.
+        // The two words are concatenated at runtime (never appearing together as one literal
+        // string in the source) so a naive substring check on the raw, unexecuted HTML can't
+        // accidentally "see" the rendered text inside the script's own source code.
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(
+          `<!doctype html><html><body><div id="app">Chargement…</div>` +
+            `<script>document.getElementById("app").innerHTML = "<h1>" + ["Produit", "rendu"].join(" ") + "</h1>";</script>` +
+            `</body></html>`,
+        );
+        return;
+      }
       res.writeHead(404);
       res.end();
     });
@@ -123,6 +152,56 @@ describe("Tools", () => {
         method: "POST",
         url: "/tools/preview-html",
         payload: { projectId, method: "GET", url: "http://127.0.0.1:1/nope" },
+      });
+      expect(response.statusCode).toBe(400);
+    });
+
+    // Needs a real system Chrome/Chromium available (see BrowserRendererService /
+    // chromeBinary.ts) — same assumption as the browser e2e suite needing a real Firefox.
+    it("plain-fetches by default, missing content that only exists after client-side JS runs", async () => {
+      const projectId = await createProject({ baseUrl });
+      const response = await app.getHttpAdapter().getInstance().inject({
+        method: "POST",
+        url: "/tools/preview-html",
+        payload: { projectId, method: "GET", url: "{{ global.baseUrl }}/spa" },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.payload) as { html: string };
+      expect(body.html).toContain("Chargement");
+      expect(body.html).not.toContain("Produit rendu");
+    });
+
+    it("with render: true, executes the page's JS in a real headless browser and captures the result", async () => {
+      const projectId = await createProject({ baseUrl });
+      const response = await app.getHttpAdapter().getInstance().inject({
+        method: "POST",
+        url: "/tools/preview-html",
+        payload: { projectId, method: "GET", url: "{{ global.baseUrl }}/spa", render: true },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.payload) as { html: string };
+      expect(body.html).toContain("Produit rendu");
+    }, 30_000);
+
+    it("with render: true, dismisses a full-screen consent overlay before capturing the DOM", async () => {
+      const projectId = await createProject({ baseUrl });
+      const response = await app.getHttpAdapter().getInstance().inject({
+        method: "POST",
+        url: "/tools/preview-html",
+        payload: { projectId, method: "GET", url: "{{ global.baseUrl }}/consent", render: true },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.payload) as { html: string };
+      expect(body.html).toContain("Contenu reel du produit");
+      expect(body.html).not.toContain("Ce site utilise des cookies");
+    }, 30_000);
+
+    it("returns 400 when render: true is combined with a non-GET method", async () => {
+      const projectId = await createProject({});
+      const response = await app.getHttpAdapter().getInstance().inject({
+        method: "POST",
+        url: "/tools/preview-html",
+        payload: { projectId, method: "POST", url: "http://example.com", render: true },
       });
       expect(response.statusCode).toBe(400);
     });

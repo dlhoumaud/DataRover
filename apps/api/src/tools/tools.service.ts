@@ -3,6 +3,7 @@ import { request } from "undici";
 import { interpolate, type ExpressionContext } from "@datarover/expression-engine";
 import { extractWithCss, type ExtractionOutcome } from "@datarover/extractor";
 import { PrismaService } from "../prisma/prisma.service";
+import { BrowserRendererService } from "./browser-renderer.service";
 import type { PreviewAssetDto, PreviewHtmlDto, TestSelectorDto } from "./dto";
 
 /** Safety cap so a pathologically large response can't blow up the browser tab rendering it. */
@@ -38,7 +39,10 @@ export interface PreviewHtmlResult {
  */
 @Injectable()
 export class ToolsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly browserRenderer: BrowserRendererService,
+  ) {}
 
   async previewHtml(input: PreviewHtmlDto): Promise<PreviewHtmlResult> {
     const project = await this.prisma.project.findUnique({ where: { id: input.projectId } });
@@ -74,6 +78,27 @@ export class ToolsService {
     const headers = input.headers
       ? (interpolate(input.headers, context) as Record<string, string>)
       : undefined;
+
+    if (input.render) {
+      if (input.method !== "GET") {
+        throw new BadRequestException(
+          `Rendered preview only supports GET (a real browser navigation), not "${input.method}"`,
+        );
+      }
+      try {
+        const rendered = await this.browserRenderer.render(target.toString(), headers);
+        const html =
+          rendered.html.length > MAX_HTML_LENGTH ? rendered.html.slice(0, MAX_HTML_LENGTH) : rendered.html;
+        return { status: rendered.status, html, url: target.toString() };
+      } catch (error) {
+        if (error instanceof BadRequestException) {
+          throw error;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        throw new BadRequestException(`Failed to render "${target.toString()}": ${message}`);
+      }
+    }
+
     const hasBody = input.body !== undefined && !BODYLESS_METHODS.has(input.method);
     const interpolatedBody = hasBody ? interpolate(input.body, context) : undefined;
 

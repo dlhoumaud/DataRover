@@ -115,6 +115,11 @@ export interface PreviewHtmlInput {
   headers?: Record<string, string>;
   queryParams?: Record<string, string>;
   body?: unknown;
+  /**
+   * Renders the page in a real headless browser server-side instead of a plain fetch — for
+   * targets whose actual content only exists after client-side JS runs. Slower; GET-only.
+   */
+  render?: boolean;
 }
 
 export interface PreviewHtmlResultDto {

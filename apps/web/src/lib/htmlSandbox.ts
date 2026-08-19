@@ -195,16 +195,49 @@ const PICKER_SCRIPT = `
     return Array.from(el.classList || []).filter(isCleanClass);
   }
 
-  function nthOfTypeSelector(el) {
+  function allClasses(el) {
+    return Array.from(el.classList || []);
+  }
+
+  function escapedClassSelector(classes) {
+    return "." + classes.map(escapeIdent).join(".");
+  }
+
+  function anchoredPathSelector(el) {
+    // Positional fallback of last resort. Deliberately climbs only up to the NEAREST ancestor
+    // that has an id or ANY class (checked without the isCleanClass filter — an auto-generated
+    // CSS-module/styled-components hash like ".Product_root__a3f92" is still a far shorter, far
+    // more robust anchor than continuing to climb all the way to <body>; this is exactly the kind
+    // of class real component-framework sites use everywhere instead of semantic tags, which is
+    // also why they tend to be the ones with no <p> at all), rather than walking all the way from
+    // the clicked element to <body> every time: a long positional path depends on the exact shape
+    // of the whole ancestor chain, and real-world markup is often quirky enough that a browser's
+    // parser and the backend's extractor (a different HTML parser) reconstruct slightly different
+    // trees for it, silently breaking a long from-the-root path. A short path anchored on the
+    // closest identifiable ancestor is far less exposed to that divergence, and is also just a
+    // better selector on its own merits.
     var parts = [];
     var node = el;
     while (node && node.nodeType === 1 && node.tagName.toLowerCase() !== "html") {
       var tag = node.tagName.toLowerCase();
+      var id = node.getAttribute("id");
+      if (id && !/^[0-9]/.test(id)) {
+        parts.unshift(tag + "#" + escapeIdent(id));
+        break;
+      }
+
+      var classes = allClasses(node);
       var parent = node.parentElement;
       if (!parent) {
         parts.unshift(tag);
         break;
       }
+
+      if (classes.length > 0) {
+        parts.unshift(tag + escapedClassSelector(classes));
+        break;
+      }
+
       var siblings = Array.from(parent.children).filter(function (child) {
         return child.tagName === node.tagName;
       });
@@ -234,6 +267,19 @@ const PICKER_SCRIPT = `
       candidates.push("." + own.join("."));
     }
 
+    // Also propose the element's exact, full class list as-is — even when every class looks
+    // auto-generated (a hash/CSS-module name), it's still a real, working selector: better to
+    // offer a "not pretty" candidate that matches than nothing at all, especially since this is
+    // exactly the situation on generic-div-only sites (no p, no id, no data-*) driven by
+    // component frameworks whose classes are near-universally hashed.
+    var raw = allClasses(el);
+    if (raw.length > 0) {
+      var rawSelector = escapedClassSelector(raw);
+      if (candidates.indexOf(rawSelector) === -1) {
+        candidates.push(rawSelector);
+      }
+    }
+
     var parent = el.parentElement;
     if (parent) {
       var parentClasses = ownClasses(parent);
@@ -242,7 +288,7 @@ const PICKER_SCRIPT = `
       }
     }
 
-    candidates.push(nthOfTypeSelector(el));
+    candidates.push(anchoredPathSelector(el));
 
     return candidates.filter(function (value, index) {
       return value && candidates.indexOf(value) === index;
