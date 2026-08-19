@@ -23,7 +23,8 @@
     "db:generate": "pnpm --filter @datarover/database run generate",
     "db:migrate": "pnpm --filter @datarover/database run migrate:dev",
     "db:migrate:deploy": "pnpm --filter @datarover/database run migrate:deploy",
-    "db:studio": "pnpm --filter @datarover/database run studio"
+    "db:studio": "pnpm --filter @datarover/database run studio",
+    "db:seed": "pnpm --filter @datarover/database run seed"
   },
   "devDependencies": {
     "@eslint/js": "^9.15.0",
