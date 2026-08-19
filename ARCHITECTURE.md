@@ -78,15 +78,67 @@ d'un projet → d'un workflow (`GET → Extract → IF → Stop`) → déclenche
 worker la traite et la fait passer `pending → success`, avec `ExecutionLog` cohérents et
 `GET /health` renvoyant `{ status: "ok", db: "ok", redis: "ok" }`.
 
+## Itération 3 — UI minimale : `apps/web` (React + Vite + React Flow) (livrée)
+
+Une interface React branchée sur le backend de l'itération 2, permettant de construire
+visuellement un workflow et de suivre son exécution — sans preview HTML/sélection visuelle ni
+WebSocket, conformément au principe de la section 27 (React Flow **représente** le modèle
+`WorkflowDefinition`, il ne le redéfinit pas : `@datarover/workflow-types` est importé directement
+côté UI, aucun type dupliqué).
+
+| Zone | Contenu |
+|---|---|
+| `src/api/*.ts` | Hooks TanStack Query v5 vers l'API (`useProjects`, `useWorkflows`, `useExecution` avec polling 1s tant que le statut n'est pas final, etc.) |
+| `src/lib/workflowGraph.ts` | Conversion `WorkflowDefinition` ⇄ nodes/edges React Flow ; **aucune position n'est persistée** (§27 : la mise en page est recalculée par un auto-layout BFS à chaque chargement, ce n'est pas une donnée du modèle) ; `generateNodeId` garantit des ids de node valides (camelCase, jamais de tiret) par construction |
+| `src/lib/editorStore.ts` | Petit store Zustand (node sélectionné, indicateur "modifications non enregistrées") |
+| `src/pages/ProjectsPage`, `ProjectDetailPage` | Liste/création de projets (variables globales en JSON), liste/création de workflows |
+| `src/pages/WorkflowEditorPage` + `components/nodes`, `components/inspectors` | Canvas React Flow, palette (5 types de node), formulaire d'inspection par type (`http`/`extract`/`condition`/`setVariable`/`stop`), sauvegarde (`PATCH /workflows/:id` → nouvelle `WorkflowVersion`), déclenchement (`POST .../executions`) |
+| `src/pages/ExecutionsPage`, `ExecutionDetailPage` | Historique, détail avec statut/résultats/journal en direct (polling) |
+
+**Vérifié** : `pnpm install && pnpm build && pnpm test && pnpm lint && pnpm typecheck` verts (278
+tests). Parcours manuel complet dans un vrai navigateur (Firefox headless piloté via
+selenium-webdriver — voir note technique ci-dessous) : création d'un projet → d'un workflow →
+ajout d'un node HTTP via la palette → édition dans le formulaire d'inspection → sauvegarde →
+exécution → la page de détail affiche `Succès` avec le journal d'exécution.
+
+### Trois bugs réels trouvés et corrigés pendant la vérification visuelle
+
+Aucun des trois n'était détectable par les tests automatisés (qui mockent `fetch` ou tournent côté
+Node sans navigateur) — c'est précisément ce que la vérification manuelle dans un vrai navigateur
+est censée attraper :
+
+1. **`app.enableCors()` semblait ne jamais s'appliquer.** Cause réelle : la création de
+   `apps/api/vitest.config.ts` (fait pour un autre correctif, voir plus bas) a changé le `rootDir`
+   que `tsc` infère pour `nest build`, qui s'est mis à compiler vers `dist/src/main.js` au lieu de
+   `dist/main.js` — le script `"start": "node dist/main.js"` exécutait donc silencieusement un
+   *ancien* build, jamais le code à jour. Fixé en fixant explicitement `rootDir: "src"` dans
+   `apps/api/tsconfig.build.json` (et en excluant `vitest.config.ts` de la compilation). Une fois
+   corrigé, le simple `app.enableCors({ origin })` d'origine fonctionnait très bien.
+2. **`apps/api`'s tests Vitest injectaient `this.projectsService`/`this.prisma` à `undefined`.**
+   Vitest transforme le TypeScript via esbuild, qui n'émet pas `emitDecoratorMetadata` — NestJS
+   ne peut alors plus résoudre l'injection de dépendances par réflexion de type en test (fonctionne
+   très bien en production via `nest build`, qui utilise `tsc`). Fixé avec un transform SWC
+   (`apps/api/vitest.config.ts` + `unplugin-swc`).
+3. **`POST /workflows/:id/executions` (sans corps) plantait avec `Body cannot be empty when
+   content-type is set to 'application/json'`.** `apiRequest` (client HTTP de `apps/web`) posait
+   systématiquement `content-type: application/json`, y compris pour les requêtes sans corps —
+   Fastify rejette ce cas précis. Fixé en ne posant l'en-tête que lorsque `init.body` est fourni.
+
+Point n°2 a aussi révélé un piège ESLint : `@typescript-eslint/consistent-type-imports` propose de
+convertir en `import type` des imports de service/contrôleur qui, du point de vue statique
+d'ESLint, ne sont "utilisés qu'en position de type" — mais NestJS a besoin que ces imports restent
+des imports de *valeur* pour que `emitDecoratorMetadata` référence la vraie classe au runtime.
+`apps/api/eslint.config.mjs` désactive cette règle pour tout le package, avec l'explication en
+commentaire.
+
 ## Explicitement hors périmètre à ce stade
 
-- **UI React** (`apps/web`) — éditeur visuel React Flow, preview HTML + sélection visuelle
-  d'éléments, gestion graphique des variables, dashboard (§6, §10, §11, §17.2).
+- **Preview HTML + sélection visuelle** de sélecteurs (§6).
 - **WebSocket temps réel** (§17.12) — le moteur émet déjà des événements (`onEvent`) et le worker
-  persiste des `ExecutionLog` au fil de l'exécution ; rien ne relaie encore ces événements en
-  direct vers un client.
+  persiste des `ExecutionLog` au fil de l'exécution ; l'UI actuelle les affiche par polling (1s),
+  pas de relais en direct.
 - **Scheduler exécutable** (§14) — les types `Schedule`/`ScheduleType` existent, mais ni table
-  Prisma, ni cron, ni endpoint.
+  Prisma, ni cron, ni endpoint, ni UI.
 - **Browser crawling / Playwright** (§5, §17.9) — seul le crawler HTTP (Undici) est implémenté.
 - **`FOR EACH` / `WHILE`** (§9.5) — explicitement V2 dans le cahier des charges (§25).
 - **Sorties** Webhook/Database/CSV (§9.6) — V2 (§25).
@@ -94,14 +146,14 @@ worker la traite et la fait passer `pending → success`, avec `ExecutionLog` co
   « planned for V2 ».
 - **Credentials/Auth**, **Docker complet** (web/api/worker/browser-worker containerisés, §19-21),
   **application Electron** (§17.3, §24) — seul un `docker-compose.yml` minimal (postgres+redis) est
-  fourni, pour le développement de ce backend uniquement.
+  fourni.
+- **Drag-and-drop riche, undo/redo, mise en page persistée** dans l'éditeur visuel — la position
+  des nodes est recalculée à chaque chargement (voir itération 3 ci-dessus), pas sauvegardée.
 
 ## Prochaines itérations (proposition, non engageante)
 
 1. ~~Backend exécutable~~ — livré (itération 2).
-2. **UI minimale** : `apps/web` (Vite + React Flow) branché sur le même modèle
-   `WorkflowDefinition`, consommant l'API de l'itération 2, avec exécution manuelle et logs (via
-   polling d'abord, WebSocket ensuite).
+2. ~~UI minimale~~ — livrée (itération 3).
 3. **Preview HTML + sélection visuelle**, **scheduler exécutable**, puis **Docker complet**
    (containerisation de `web`/`api`/`worker`/`browser-worker`) et **coquille Electron**, dans
    l'esprit de la section 24 (MVP v1).

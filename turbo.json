@@ -12,8 +12,10 @@
     "REDIS_PASSWORD",
     "API_PORT",
     "WEB_PORT",
+    "WEB_ORIGIN",
     "WORKER_CONCURRENCY",
-    "NODE_ENV"
+    "NODE_ENV",
+    "VITE_API_URL"
   ],
   "tasks": {
     "build": {

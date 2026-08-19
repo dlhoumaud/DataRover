@@ -12,10 +12,11 @@ réel d'avancement (ce qui est implémenté vs le reste de la vision) est docume
 
 ## État actuel
 
-Deux itérations livrées : le **moteur de workflow** (packages TypeScript purs) et un **backend
-exécutable** (API NestJS + PostgreSQL + worker BullMQ) qui l'expose en HTTP. Pas encore d'UI, pas
-de Docker complet, pas d'Electron (voir [`ARCHITECTURE.md`](./ARCHITECTURE.md) pour le détail et la
-feuille de route).
+Trois itérations livrées : le **moteur de workflow** (packages TypeScript purs), un **backend
+exécutable** (API NestJS + PostgreSQL + worker BullMQ), et une **UI React minimale** (éditeur
+visuel React Flow) branchée dessus. Pas encore de preview HTML/sélection visuelle, de scheduler
+exécutable, de Docker complet ni d'Electron (voir [`ARCHITECTURE.md`](./ARCHITECTURE.md) pour le
+détail et la feuille de route).
 
 ```text
 packages/
@@ -29,7 +30,8 @@ packages/
 
 apps/
 ├── api                  API NestJS (Fastify) : projets, workflows, exécutions, health
-└── worker               consomme la queue, exécute le moteur, persiste le résultat
+├── worker               consomme la queue, exécute le moteur, persiste le résultat
+└── web                  UI React (Vite + React Flow) : éditeur visuel, exécution, suivi
 
 examples/
 └── product-monitor      démo exécutable du moteur seul (scénario "Surveillance catalogue")
@@ -54,16 +56,17 @@ docker compose up -d postgres redis   # ou: pnpm infra:up
 pnpm install                          # génère aussi le client Prisma
 pnpm db:migrate                       # première migration (nomme-la ex. "init")
 pnpm build                            # build tous les packages/apps
-pnpm test                             # 257 tests (unitaires + intégration + e2e api/worker)
+pnpm test                             # 278 tests (unitaires + intégration + e2e api/worker/web)
 pnpm lint
 pnpm typecheck
 
 # Démo moteur seul, sans DB/API : GET → Extract → IF, rejouée avec le moteur réel
 pnpm --filter @datarover/example-product-monitor start
 
-# Démo backend complet : deux process séparés (l'API n'exécute jamais le moteur elle-même)
+# Stack complète : trois process séparés (l'API n'exécute jamais le moteur elle-même)
 node apps/api/dist/main.js      # écoute sur $API_PORT (3001 par défaut)
 node apps/worker/dist/main.js   # consomme la queue et exécute les workflows
+pnpm --filter @datarover/web dev  # UI sur http://localhost:5173
 ```
 
 ## Licence
