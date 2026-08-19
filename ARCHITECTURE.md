@@ -96,10 +96,12 @@ côté UI, aucun type dupliqué).
 | `src/pages/ExecutionsPage`, `ExecutionDetailPage` | Historique, détail avec statut/résultats/journal en direct (polling) |
 
 **Vérifié** : `pnpm install && pnpm build && pnpm test && pnpm lint && pnpm typecheck` verts (278
-tests). Parcours manuel complet dans un vrai navigateur (Firefox headless piloté via
-selenium-webdriver — voir note technique ci-dessous) : création d'un projet → d'un workflow →
-ajout d'un node HTTP via la palette → édition dans le formulaire d'inspection → sauvegarde →
-exécution → la page de détail affiche `Succès` avec le journal d'exécution.
+tests). Parcours complet dans un vrai navigateur (Firefox headless piloté via `selenium-webdriver`
+— voir note technique ci-dessous) : création d'un projet → d'un workflow → ajout d'un node HTTP
+via la palette → édition dans le formulaire d'inspection → sauvegarde → exécution → la page de
+détail affiche `Succès` avec le journal d'exécution. Ce parcours a d'abord été vérifié à la main,
+puis formalisé en suite automatisée committée (`apps/web/e2e/`, `pnpm test:e2e` — voir le README,
+section « Tests e2e navigateur »).
 
 ### Trois bugs réels trouvés et corrigés pendant la vérification visuelle
 
