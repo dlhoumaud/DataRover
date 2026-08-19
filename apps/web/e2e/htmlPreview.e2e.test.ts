@@ -149,17 +149,55 @@ describe("HTML preview & selection", () => {
     await targetSpan.click();
     await driver.switchTo().defaultContent();
 
-    // 6. The click posts the candidate selectors to the parent window — the sidebar should show
-    // the exact selector shape called out in Specs.md §6 (`.product-card .title`) among the
-    // candidates, alongside the `data-testid` one which sorts first (and so is pre-selected).
-    await driver.wait(
-      until.elementLocated(By.xpath("//*[contains(.,'.product-card .title')]")),
-      TIMEOUT,
+    // 6. The click posts the candidate selectors to the parent window. Candidates are rendered
+    // as editable inputs (not read-only choices — the user can hand-fix or add one), so their
+    // current value is read via getAttribute("value") (WebDriver's special-cased, reliable way
+    // to read a form element's live value) rather than searched for as text content.
+    const sidebar = await driver.findElement(
+      By.xpath("//h3[contains(.,'Sélection')]/ancestor::div[contains(@class,'w-96')]"),
     );
-    await driver.wait(
-      until.elementLocated(By.xpath('//*[contains(.,\'[data-testid="title"]\')]')),
-      TIMEOUT,
-    );
+    await driver.wait(async () => {
+      const inputs = await sidebar.findElements(By.css("input.font-mono"));
+      if (inputs.length === 0) {
+        return false;
+      }
+      const values = await Promise.all(inputs.map((input) => input.getAttribute("value")));
+      // The exact selector shape called out in Specs.md §6, alongside the `data-testid` one
+      // (highest-scored, so the one the backend actually matches on).
+      return values.includes(".product-card .title") && values.includes('[data-testid="title"]');
+    }, TIMEOUT);
+
+    // "Aperçu du résultat" only renders once some candidate actually matched — wait for it before
+    // relying on "Ajouter cette règle" being enabled.
+    await driver.wait(until.elementLocated(By.xpath("//pre[contains(.,'Produit A')]")), TIMEOUT);
+
+    // 6b. Candidates are editable, on purpose: hand-break the ".title" one and confirm it gets
+    // re-tested automatically (debounced) and flips to "not matched" — while the still-valid
+    // `data-testid` candidate keeps the overall preview alive. Locate by current value (not by
+    // an `@value=...` XPath predicate — a controlled input's live value lives on the DOM
+    // property, not the attribute XPath reads) among elements found by stable structure.
+    const candidateInputs = await sidebar.findElements(By.css("input.font-mono"));
+    let titleInput;
+    for (const input of candidateInputs) {
+      if ((await input.getAttribute("value")) === ".title") {
+        titleInput = input;
+        break;
+      }
+    }
+    if (!titleInput) {
+      throw new Error("expected a '.title' candidate among the auto-computed ones");
+    }
+    await titleInput.clear();
+    await titleInput.sendKeys(".this-class-does-not-exist");
+    await driver.wait(async () => {
+      const badges = await titleInput.findElements(By.xpath("following-sibling::span"));
+      if (badges.length === 0) {
+        return false;
+      }
+      return (await badges[0].getText()).trim() === "✕";
+    }, TIMEOUT);
+    // The data-testid candidate still matches, so the result preview never went away.
+    await driver.wait(until.elementLocated(By.xpath("//pre[contains(.,'Produit A')]")), TIMEOUT);
 
     // 7. Name the rule and validate it
     const ruleNameInput = await driver.wait(

@@ -195,14 +195,14 @@ exécuter le script du site cible dans l'application.
 | Zone | Contenu |
 |---|---|
 | `apps/api/src/tools/` | `POST /tools/preview-html` (interpole l'URL/en-têtes/paramètres avec les variables globales du projet via `@datarover/expression-engine`, fait la requête via `undici`, timeout 10s, plafond 5 Mo), `POST /tools/test-selector` (délègue tel quel à `extractWithCss`/`scoreSelector` de `@datarover/extractor`), et `GET /tools/preview-asset` (voir bug n°1 ci-dessous) — aucun des trois ne touche `@datarover/workflow-core` : l'API continue de ne jamais exécuter le moteur (§17.6) |
-| `src/lib/htmlSandbox.ts` | Nettoyage `DOMParser` du HTML récupéré avant injection dans l'iframe : retrait de tout `<script>`, attribut d'événement inline (`onclick`, ...), URL `javascript:`, `<meta http-equiv="refresh">` ; réécriture de chaque `<img src>`/`srcset` vers `/tools/preview-asset` (voir bug n°1) ; injection d'un `<base href>` (URL résolue renvoyée par le backend) pour tout le reste ; un unique script *que nous écrivons* est ajouté ensuite pour le survol/clic et le calcul côté client des sélecteurs candidats (`data-*`, id, classe propre, classe-parent + classe-propre, chemin `nth-of-type` de repli) |
+| `src/lib/htmlSandbox.ts` | Nettoyage `DOMParser` du HTML récupéré avant injection dans l'iframe : retrait de tout `<script>`, attribut d'événement inline (`onclick`, ...), URL `javascript:`, `<meta http-equiv="refresh">` ; réécriture de chaque `<img src>`/`srcset` vers `/tools/preview-asset` (voir bug n°1) ; injection d'un `<base href>` (URL résolue renvoyée par le backend) pour tout le reste ; un unique script *que nous écrivons* est ajouté ensuite pour le survol/clic et le calcul côté client des sélecteurs candidats (`data-*`, id, classe propre, classe-parent + classe-propre, chemin positionnel de repli ancré sur le plus proche ancêtre stable — voir bug n°3) |
 | `src/components/HtmlPreviewSelector.tsx` | La modale (plein écran, voir bug n°2) : iframe `sandbox="allow-scripts"` **sans** `allow-same-origin` (origine opaque) à gauche, panneau de score/validation à droite (réutilise le score renvoyé par le vrai `scoreSelector`, pas une heuristique dupliquée) ; plusieurs règles peuvent être accumulées avant "Terminer" |
 | `HttpNodeInspector` / `NodeInspectorPanel` / `WorkflowEditorPage` | Bouton "Prévisualiser & sélectionner" visible quand `responseType === "html"` et `url` non vide ; validation → nouveau node `extract` (`source` = le node http, `sourceType: "html"`) créé et relié par une edge, sélectionné automatiquement — même conventions `generateNodeId`/`createDefaultNode` que les autres ajouts de node |
 
-### Deux bugs réels trouvés et corrigés après la première livraison de l'itération 4
+### Quatre bugs/limites réels trouvés et corrigés après la première livraison de l'itération 4
 
 1. **Les images de la page prévisualisée ne s'affichaient pas.** Reproduit avec un vrai site
-   (chronocarpe.com) via Firefox piloté par Selenium : les `<img>` atteignaient `complete: true`
+   e-commerce (signalé par l'utilisateur) via Firefox piloté par Selenium : les `<img>` atteignaient `complete: true`
    mais `naturalWidth: 0` (chargement silencieusement échoué). Isolé la cause exacte avant de
    corriger : ce n'est pas le sandboxing en lui-même (vérifié isolément — une image d'un CDN
    permissif se charge très bien dans un iframe `sandbox="allow-scripts"` sans
@@ -218,10 +218,79 @@ exécuter le script du site cible dans l'application.
 2. **La popup de prévisualisation était trop petite** (`max-w-6xl`, soit 1152px max, quelle que soit
    la taille de l'écran). Fixée pour occuper toute la largeur/hauteur de la fenêtre (marge de 0,5rem
    conservée pour la lisibilité du cadre).
+3. **Cliquer un `<div>` générique (sans `id`/`data-*`/classe "propre") n'affichait aucun "Aperçu du
+   résultat".** Reproduit avec un vrai fixture reprenant le cas signalé : une page uniquement faite
+   de `<div>` (aucune balise `p`), stylée avec des classes façon CSS-modules/styled-components
+   (`ProductDescription_body__a3f92`) — exactement le style de markup des sites pilotés par un
+   framework composant, qui n'utilisent quasiment jamais de balises sémantiques. Cause : le filtre
+   `isCleanClass` du script de picking (`htmlSandbox.ts`) rejette ces classes "hashées" (trop
+   longues ou pleines de chiffres) de la liste des candidats, ne laissant que le chemin positionnel
+   de repli — bien plus fragile. Fixé par deux changements : (a) un nouveau candidat propose
+   toujours la classe complète telle quelle, même "moche"/hashée, plutôt que rien ; (b) le chemin
+   positionnel de repli (`anchoredPathSelector`) s'ancre désormais sur le plus proche ancêtre ayant
+   un `id` OU **n'importe quelle** classe (plus seulement une classe "propre"), au lieu de toujours
+   remonter jusqu'à `<body>` — un chemin plus court est nécessairement plus robuste. Vérifié avec un
+   test dédié reproduisant exactement ce cas : le nouveau candidat `.ProductDescription_body__a3f92`
+   apparaît et l'aperçu affiche bien le texte du bloc.
+4. **Les sélecteurs candidats n'étaient que des boutons en lecture seule.** Quand l'auto-détection
+   ne trouve rien de satisfaisant (cas n°3 ci-dessus, ou toute autre page atypique), il n'y avait
+   aucun moyen de s'en sortir depuis l'interface. Fixé : chaque candidat est maintenant un champ
+   texte éditable, re-testé automatiquement contre l'API (debounce 400 ms) à chaque modification —
+   un bouton "+ ajouter" permet aussi d'écrire un sélecteur entièrement à la main. "Ajouter cette
+   règle" n'est activable que si au moins un candidat correspond réellement (`matchedSelector`),
+   et la règle créée regroupe désormais **tous** les candidats actuellement valides comme chaîne de
+   repli ordonnée par score — pas seulement le premier — ce qui correspond exactement à la sémantique
+   de `ExtractionRule.selectors`.
 
-Vérifié à nouveau contre chronocarpe.com après le correctif (mêmes outils, Selenium + inspection
-DOM réelle) : 67 images sur 67 chargées (`naturalWidth > 0`, 0 cassée), et la modale mesure
-1572×882 dans une fenêtre de 1600×914 (plein écran, marge de cadrage seulement).
+Vérifié à nouveau contre le même site réel après le correctif des images/de la taille (mêmes outils,
+Selenium + inspection DOM réelle) : 67 images sur 67 chargées (`naturalWidth > 0`, 0 cassée), et la
+modale mesure 1572×882 dans une fenêtre de 1600×914 (plein écran, marge de cadrage seulement). Le
+scénario e2e navigateur committé (`apps/web/e2e/htmlPreview.e2e.test.ts`) couvre maintenant aussi
+l'édition en direct d'un candidat (cassé à la main → badge "non correspondant" après le debounce,
+sans perdre l'aperçu du candidat toujours valide).
+
+### Rendu JavaScript pour les pages React/Vue/etc. dont le contenu réel n'existe qu'après script
+
+Signalé sur une vraie page (une "focus promo" d'un site e-commerce, en React) : cliquer un élément
+n'affichait jamais rien de pertinent. Diagnostic direct (pas une supposition) : le HTML brut récupéré
+par `preview-html` ne contenait **aucune balise `<h1>`**, et l'état JSON embarqué dans la page
+avait un objet `"product": {}` vide, même avec un User-Agent "Googlebot" — le contenu réel de cette
+page n'existe tout simplement pas dans le HTML servi, il n'apparaît qu'après exécution du JS
+React côté client. Or l'outil de preview ne peut pas, par principe, exécuter le JS du site cible
+dans l'application (voir modèle de sécurité ci-dessous) — il n'y avait donc littéralement rien de
+réel à cliquer.
+
+Ajout d'une case "Rendu JavaScript" (décochée par défaut — plus lente, GET uniquement) dans la
+modale de preview : quand elle est activée, `POST /tools/preview-html` (`render: true`) délègue à
+`BrowserRendererService` (`apps/api/src/tools/browser-renderer.service.ts`), qui exécute le JS de
+la page dans un **vrai navigateur headless, dans un processus disposable séparé** (piloté via
+`playwright-core`, sans lui faire télécharger/gérer son propre Chromium — cet environnement n'a pas
+le `sudo` nécessaire pour ses dépendances système ; on pilote plutôt le Chrome déjà installé sur la
+machine, résolu via `CHROME_EXECUTABLE_PATH` ou des chemins standards, voir `chromeBinary.ts`). Le
+JS du site cible ne tourne **jamais** dans ce process Node ni dans le frontend — seul le DOM
+résultant (`page.content()`, du texte HTML inerte) est renvoyé, et il retraverse exactement le
+même pipeline de sanitisation (`buildSandboxedDocument`) qu'un fetch brut. Ceci ne concerne que
+l'outil de preview interactif : l'exécuteur `http` du moteur reste strictement HTTP (Undici), une
+exécution de workflow ne rend jamais de JS.
+
+**Bandeau de consentement cookies bloquant tout le rendu.** Premier test réel sur la page
+signalée : le rendu s'exécutait bien, mais une capture d'écran a montré qu'un bandeau
+plein-écran (Cookiebot, dans ce cas précis) recouvrait tout le contenu réel — présent dans le DOM
+mais invisible et non cliquable derrière l'overlay. `BrowserRendererService.dismissConsentBanner`
+tente maintenant de le fermer avant de capturer le DOM : une liste de sélecteurs des CMP les plus
+courants (Didomi, OneTrust, Quantcast, Cookiebot) essayés **en parallèle** (pas séquentiellement —
+un CMP peut prendre plusieurs secondes à s'initialiser, et essayer les sélecteurs un par un aurait
+épuisé le budget de temps sur ceux qui ne correspondent jamais avant même d'atteindre le bon), puis
+un repli générique par texte du bouton ("j'accepte", "tout accepter", "accept all", ...) si aucun
+des sélecteurs connus ne correspond. Best-effort et jamais bloquant : un bandeau non fermé donne
+juste un aperçu qui montre encore le bandeau, jamais un échec du rendu.
+
+**Vérifié** : deux tests e2e API dédiés (`apps/api/test/tools.e2e.test.ts`) contre des fixtures
+locales — un fetch brut d'une page dont le contenu n'apparaît qu'après un script (le fetch brut ne
+le voit pas, `render: true` le capture) et une page avec un faux bandeau plein-écran (fermé avant
+capture). Revérifié ensuite contre la page réelle signalée, avec capture d'écran de l'aperçu
+obtenu : le bandeau Cookiebot a disparu et la page réelle (navigation, panier, grille de produits
+"Moulinet Avid Carp...", prix, boutons "Acheter") s'affiche entièrement.
 
 **Modèle de sécurité de la prévisualisation** (répond à l'exigence explicite de §6) : la
 communication iframe → parent passe exclusivement par `postMessage`, vérifiée côté parent via
@@ -229,9 +298,10 @@ communication iframe → parent passe exclusivement par `postMessage`, vérifié
 opaque) ; chaque clic dans l'aperçu appelle `preventDefault`/`stopPropagation` en phase de capture,
 donc aucune navigation ni soumission de formulaire ne peut s'échapper de l'aperçu.
 
-**Vérifié** : `pnpm install && pnpm build && pnpm test && pnpm lint && pnpm typecheck` verts (301
-tests, dont les 9 tests e2e API de `apps/api/test/tools.e2e.test.ts` — y compris `preview-asset`
-contre un serveur de fixture HTTP local réel — et les 13 tests unitaires de `htmlSandbox.ts`).
+**Vérifié** : `pnpm install && pnpm build && pnpm test && pnpm lint && pnpm typecheck` verts (305
+tests, dont les 13 tests e2e API de `apps/api/test/tools.e2e.test.ts` — `preview-asset` et le rendu
+JavaScript compris, chacun contre un serveur de fixture HTTP local réel — et les 13 tests
+unitaires de `htmlSandbox.ts`).
 Parcours complet
 dans un vrai navigateur (Firefox headless), formalisé en scénario e2e committé
 (`apps/web/e2e/htmlPreview.e2e.test.ts`, inclus dans `pnpm test:e2e`) : création d'un node HTTP
@@ -248,7 +318,10 @@ node `extract` apparaît, relié au node http, avec la règle validée → sauve
   pas de relais en direct.
 - **Scheduler exécutable** (§14) — les types `Schedule`/`ScheduleType` existent, mais ni table
   Prisma, ni cron, ni endpoint, ni UI.
-- **Browser crawling / Playwright** (§5, §17.9) — seul le crawler HTTP (Undici) est implémenté.
+- **Browser crawling / Playwright pour l'exécution des workflows** (§5, §17.9) — le moteur
+  (`packages/workflow-core`, exécuteur `http`) reste strictement HTTP (Undici). Un rendu headless
+  Playwright existe désormais, mais uniquement pour l'outil de preview interactif de l'éditeur (voir
+  itération 4, "Rendu JavaScript") — une exécution de workflow réelle ne rend jamais de JS.
 - **`FOR EACH` / `WHILE`** (§9.5) — explicitement V2 dans le cahier des charges (§25).
 - **Sorties** Webhook/Database/CSV (§9.6) — V2 (§25).
 - **XPath** comme stratégie d'extraction — le type existe, l'exécution lève une erreur explicite
@@ -277,7 +350,7 @@ docker compose up -d postgres redis     # ou: pnpm infra:up
 pnpm install                             # génère aussi le client Prisma
 pnpm db:migrate                          # première migration (interactif la 1ère fois : --name init)
 pnpm build
-pnpm test        # 301 tests Vitest (unitaires + intégration moteur + e2e api/worker sur vrai Postgres/Redis)
+pnpm test        # 305 tests Vitest (unitaires + intégration moteur + e2e api/worker sur vrai Postgres/Redis)
 pnpm lint
 pnpm typecheck
 

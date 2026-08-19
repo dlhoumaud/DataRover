@@ -14,6 +14,13 @@ export const PreviewHtmlSchema = z.object({
   headers: z.record(z.string(), z.string()).optional(),
   queryParams: z.record(z.string(), z.string()).optional(),
   body: z.unknown().optional(),
+  /**
+   * When true, the page is rendered in a real headless browser instead of plain-fetched — for
+   * targets whose actual content only exists after client-side JS runs (a SPA shell with no
+   * meaningful server-rendered markup). Slower (real navigation + wait for network idle) and only
+   * supported for GET, matching normal page-navigation semantics — see BrowserRendererService.
+   */
+  render: z.boolean().optional(),
 });
 export type PreviewHtmlDto = z.infer<typeof PreviewHtmlSchema>;
 

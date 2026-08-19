@@ -43,6 +43,13 @@ examples/
 - Node.js ≥ 20 (voir `.nvmrc`)
 - pnpm ≥ 9 (via Corepack)
 - Docker (pour PostgreSQL + Redis en local — `docker-compose.yml`)
+- Un vrai Firefox installé (pour `pnpm test:e2e`, voir "Tests e2e navigateur" plus bas)
+- Optionnel — Google Chrome ou Chromium installé, pour l'option "Rendu JavaScript" de l'outil de
+  preview HTML (`apps/api/src/tools/browser-renderer.service.ts`) : nécessaire uniquement pour
+  prévisualiser des pages dont le contenu réel n'existe qu'après exécution du JS côté client (une
+  SPA React/Vue/etc.) ; sans Chrome installé, tout le reste de l'app fonctionne normalement, seule
+  cette case à cocher renvoie une erreur explicite si on l'active. Chemin détecté automatiquement
+  (`/usr/bin/google-chrome`, etc.) ou fourni via `CHROME_EXECUTABLE_PATH`.
 
 ```bash
 corepack enable
