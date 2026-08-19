@@ -1,4 +1,4 @@
-import type { ActionNode } from "@datarover/workflow-types";
+import type { ActionNode, ExtractionRule } from "@datarover/workflow-types";
 import { HttpNodeInspector } from "./inspectors/HttpNodeInspector";
 import { ExtractNodeInspector } from "./inspectors/ExtractNodeInspector";
 import { ConditionNodeInspector } from "./inspectors/ConditionNodeInspector";
@@ -8,13 +8,19 @@ import { StopNodeInspector } from "./inspectors/StopNodeInspector";
 export function NodeInspectorPanel({
   node,
   availableNodeIds,
+  projectId,
   onChange,
   onClose,
+  onCreateExtractNode,
 }: {
   node: ActionNode | null;
   availableNodeIds: string[];
+  /** Needed by HttpNodeInspector's preview & selection tool (Specs.md §6). */
+  projectId: string;
   onChange: (updated: ActionNode) => void;
   onClose: () => void;
+  /** Forwarded to HttpNodeInspector — see its own doc comment. */
+  onCreateExtractNode: (rules: ExtractionRule[]) => void;
 }): JSX.Element | null {
   if (node === null) {
     return null;
@@ -28,7 +34,15 @@ export function NodeInspectorPanel({
   function renderInspector(): JSX.Element {
     switch (currentNode.type) {
       case "http":
-        return <HttpNodeInspector key={currentNode.id} node={currentNode} onChange={onChange} />;
+        return (
+          <HttpNodeInspector
+            key={currentNode.id}
+            node={currentNode}
+            onChange={onChange}
+            projectId={projectId}
+            onCreateExtractNode={onCreateExtractNode}
+          />
+        );
       case "extract":
         return (
           <ExtractNodeInspector

@@ -184,9 +184,65 @@ Prisma. Plutôt que de dépendre de cette heuristique interne, `migrate:dev` cha
 crée jamais de doublon et ne réécrase jamais une modification faite depuis l'UI. `migrate:deploy`
 (usage prod/CI) n'appelle jamais le seed.
 
+## Itération 4 — Preview HTML + sélection visuelle d'éléments (livrée)
+
+Le point 3 de la feuille de route ci-dessous (§6, §8) : depuis un node `http` en
+`responseType: "html"` avec une URL définie, l'éditeur propose désormais de prévisualiser la page
+réellement rendue par le site cible, de cliquer un élément, d'obtenir plusieurs sélecteurs
+candidats notés par robustesse, et de valider pour créer un node `extract` relié — sans jamais
+exécuter le script du site cible dans l'application.
+
+| Zone | Contenu |
+|---|---|
+| `apps/api/src/tools/` | `POST /tools/preview-html` (interpole l'URL/en-têtes/paramètres avec les variables globales du projet via `@datarover/expression-engine`, fait la requête via `undici`, timeout 10s, plafond 5 Mo), `POST /tools/test-selector` (délègue tel quel à `extractWithCss`/`scoreSelector` de `@datarover/extractor`), et `GET /tools/preview-asset` (voir bug n°1 ci-dessous) — aucun des trois ne touche `@datarover/workflow-core` : l'API continue de ne jamais exécuter le moteur (§17.6) |
+| `src/lib/htmlSandbox.ts` | Nettoyage `DOMParser` du HTML récupéré avant injection dans l'iframe : retrait de tout `<script>`, attribut d'événement inline (`onclick`, ...), URL `javascript:`, `<meta http-equiv="refresh">` ; réécriture de chaque `<img src>`/`srcset` vers `/tools/preview-asset` (voir bug n°1) ; injection d'un `<base href>` (URL résolue renvoyée par le backend) pour tout le reste ; un unique script *que nous écrivons* est ajouté ensuite pour le survol/clic et le calcul côté client des sélecteurs candidats (`data-*`, id, classe propre, classe-parent + classe-propre, chemin `nth-of-type` de repli) |
+| `src/components/HtmlPreviewSelector.tsx` | La modale (plein écran, voir bug n°2) : iframe `sandbox="allow-scripts"` **sans** `allow-same-origin` (origine opaque) à gauche, panneau de score/validation à droite (réutilise le score renvoyé par le vrai `scoreSelector`, pas une heuristique dupliquée) ; plusieurs règles peuvent être accumulées avant "Terminer" |
+| `HttpNodeInspector` / `NodeInspectorPanel` / `WorkflowEditorPage` | Bouton "Prévisualiser & sélectionner" visible quand `responseType === "html"` et `url` non vide ; validation → nouveau node `extract` (`source` = le node http, `sourceType: "html"`) créé et relié par une edge, sélectionné automatiquement — même conventions `generateNodeId`/`createDefaultNode` que les autres ajouts de node |
+
+### Deux bugs réels trouvés et corrigés après la première livraison de l'itération 4
+
+1. **Les images de la page prévisualisée ne s'affichaient pas.** Reproduit avec un vrai site
+   (chronocarpe.com) via Firefox piloté par Selenium : les `<img>` atteignaient `complete: true`
+   mais `naturalWidth: 0` (chargement silencieusement échoué). Isolé la cause exacte avant de
+   corriger : ce n'est pas le sandboxing en lui-même (vérifié isolément — une image d'un CDN
+   permissif se charge très bien dans un iframe `sandbox="allow-scripts"` sans
+   `allow-same-origin`) ; c'est le CDN du site cible qui bloque des requêtes d'image faites depuis
+   le contexte de l'iframe (protection anti-hotlink/anti-scraping côté CDN, comportement propre à
+   chaque site). Le même `undici`, exécuté côté backend, récupère pourtant ces mêmes images sans
+   problème (vérifié directement). Fixé en ajoutant `GET /tools/preview-asset?url=...` : chaque
+   `<img src>`/`srcset` de l'aperçu est réécrit pour passer par ce proxy backend plutôt que de
+   charger directement depuis le site cible — fiable quel que soit le mécanisme de blocage du site,
+   puisque c'est le même client HTTP serveur qui a déjà réussi à récupérer la page elle-même.
+   Limite connue documentée dans le code : les images posées en CSS (`background-image: url(...)`)
+   ne sont pas encore réécrites, seules les vraies balises `<img>`.
+2. **La popup de prévisualisation était trop petite** (`max-w-6xl`, soit 1152px max, quelle que soit
+   la taille de l'écran). Fixée pour occuper toute la largeur/hauteur de la fenêtre (marge de 0,5rem
+   conservée pour la lisibilité du cadre).
+
+Vérifié à nouveau contre chronocarpe.com après le correctif (mêmes outils, Selenium + inspection
+DOM réelle) : 67 images sur 67 chargées (`naturalWidth > 0`, 0 cassée), et la modale mesure
+1572×882 dans une fenêtre de 1600×914 (plein écran, marge de cadrage seulement).
+
+**Modèle de sécurité de la prévisualisation** (répond à l'exigence explicite de §6) : la
+communication iframe → parent passe exclusivement par `postMessage`, vérifiée côté parent via
+`event.source === iframe.contentWindow` (jamais `event.origin`, qui vaut `"null"` pour une origine
+opaque) ; chaque clic dans l'aperçu appelle `preventDefault`/`stopPropagation` en phase de capture,
+donc aucune navigation ni soumission de formulaire ne peut s'échapper de l'aperçu.
+
+**Vérifié** : `pnpm install && pnpm build && pnpm test && pnpm lint && pnpm typecheck` verts (301
+tests, dont les 9 tests e2e API de `apps/api/test/tools.e2e.test.ts` — y compris `preview-asset`
+contre un serveur de fixture HTTP local réel — et les 13 tests unitaires de `htmlSandbox.ts`).
+Parcours complet
+dans un vrai navigateur (Firefox headless), formalisé en scénario e2e committé
+(`apps/web/e2e/htmlPreview.e2e.test.ts`, inclus dans `pnpm test:e2e`) : création d'un node HTTP
+pointé vers un vrai serveur de fixture local → ouverture de l'aperçu → **clic réel** sur un élément
+à l'intérieur de l'iframe sandboxée (bascule de contexte WebDriver dans le frame) → les sélecteurs
+candidats affichés correspondent exactement à l'exemple du cahier des charges
+(`[data-testid="title"]`, `.title`, `.product-card .title`) avec un score cohérent → validation → un
+node `extract` apparaît, relié au node http, avec la règle validée → sauvegarde réussie.
+
 ## Explicitement hors périmètre à ce stade
 
-- **Preview HTML + sélection visuelle** de sélecteurs (§6).
 - **WebSocket temps réel** (§17.12) — le moteur émet déjà des événements (`onEvent`) et le worker
   persiste des `ExecutionLog` au fil de l'exécution ; l'UI actuelle les affiche par polling (1s),
   pas de relais en direct.
@@ -207,9 +263,10 @@ crée jamais de doublon et ne réécrase jamais une modification faite depuis l'
 
 1. ~~Backend exécutable~~ — livré (itération 2).
 2. ~~UI minimale~~ — livrée (itération 3).
-3. **Preview HTML + sélection visuelle**, **scheduler exécutable**, puis **Docker complet**
-   (containerisation de `web`/`api`/`worker`/`browser-worker`) et **coquille Electron**, dans
-   l'esprit de la section 24 (MVP v1).
+3. ~~Preview HTML + sélection visuelle~~ — livrée (itération 4).
+4. **Scheduler exécutable**, puis **Docker complet** (containerisation de
+   `web`/`api`/`worker`/`browser-worker`) et **coquille Electron**, dans l'esprit de la section 24
+   (MVP v1).
 
 ## Comment vérifier
 
@@ -220,7 +277,7 @@ docker compose up -d postgres redis     # ou: pnpm infra:up
 pnpm install                             # génère aussi le client Prisma
 pnpm db:migrate                          # première migration (interactif la 1ère fois : --name init)
 pnpm build
-pnpm test        # 257 tests Vitest (unitaires + intégration moteur + e2e api/worker sur vrai Postgres/Redis)
+pnpm test        # 301 tests Vitest (unitaires + intégration moteur + e2e api/worker sur vrai Postgres/Redis)
 pnpm lint
 pnpm typecheck
 

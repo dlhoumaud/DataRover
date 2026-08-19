@@ -1,4 +1,10 @@
-import type { ActionResult, ExecutionStatus, WorkflowDefinition } from "@datarover/workflow-types";
+import type {
+  ActionResult,
+  ExecutionStatus,
+  ExtractOutputType,
+  HttpMethod,
+  WorkflowDefinition,
+} from "@datarover/workflow-types";
 
 /**
  * HTTP response DTOs, as actually returned by the NestJS API — these are
@@ -95,3 +101,44 @@ export interface UpdateWorkflowInput {
  * stop refetching once an execution has settled.
  */
 export const TERMINAL_EXECUTION_STATUSES: ExecutionStatus[] = ["success", "failed", "cancelled"];
+
+/**
+ * DTOs for the "Prévisualiser & sélectionner" tool (Specs.md §6/§8),
+ * backed by POST /tools/preview-html and POST /tools/test-selector — see
+ * src/api/tools.ts.
+ */
+
+export interface PreviewHtmlInput {
+  projectId: string;
+  method: HttpMethod;
+  url: string;
+  headers?: Record<string, string>;
+  queryParams?: Record<string, string>;
+  body?: unknown;
+}
+
+export interface PreviewHtmlResultDto {
+  status: number;
+  html: string;
+  url: string;
+}
+
+export interface SelectorScoreDto {
+  selector: string;
+  score: number;
+  matched: boolean;
+}
+
+export interface TestSelectorInput {
+  html: string;
+  selectors: string[];
+  output?: ExtractOutputType;
+  attribute?: string;
+}
+
+export interface TestSelectorResultDto {
+  name: string;
+  value: unknown;
+  matchedSelector?: string;
+  selectorScores: SelectorScoreDto[];
+}

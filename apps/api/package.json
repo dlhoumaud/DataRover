@@ -24,7 +24,10 @@
     "zod": "^3.23.8",
     "bullmq": "^5.34.0",
     "ioredis": "^5.4.1",
+    "undici": "^6.21.0",
     "@datarover/database": "workspace:*",
+    "@datarover/expression-engine": "workspace:*",
+    "@datarover/extractor": "workspace:*",
     "@datarover/queue": "workspace:*",
     "@datarover/workflow-types": "workspace:*"
   },

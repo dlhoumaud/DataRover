@@ -44,6 +44,12 @@ importers:
       '@datarover/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@datarover/expression-engine':
+        specifier: workspace:*
+        version: link:../../packages/expression-engine
+      '@datarover/extractor':
+        specifier: workspace:*
+        version: link:../../packages/extractor
       '@datarover/queue':
         specifier: workspace:*
         version: link:../../packages/queue
@@ -77,6 +83,9 @@ importers:
       rxjs:
         specifier: ^7.8.1
         version: 7.8.2
+      undici:
+        specifier: ^6.21.0
+        version: 6.28.0
       zod:
         specifier: ^3.23.8
         version: 3.25.76

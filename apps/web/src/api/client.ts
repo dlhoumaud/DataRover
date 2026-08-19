@@ -4,7 +4,9 @@
  * individual hooks stay one-liners.
  */
 
-const API_BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
+// Exported (not just module-local) so lib/htmlSandbox.ts can build asset-proxy URLs
+// (`${API_BASE_URL}/tools/preview-asset?...`) without a second, divergent source of truth.
+export const API_BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
 
 export class ApiError extends Error {
   constructor(
