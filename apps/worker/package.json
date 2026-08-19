@@ -5,10 +5,10 @@
   "type": "module",
   "scripts": {
     "build": "tsup",
-    "dev": "tsx watch src/main.ts",
-    "start": "node dist/main.js",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "dev": "dotenv -e ../../.env -- tsx watch src/main.ts",
+    "start": "dotenv -e ../../.env -- node dist/main.js",
+    "test": "dotenv -e ../../.env -- vitest run",
+    "test:watch": "dotenv -e ../../.env -- vitest",
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",
     "clean": "rimraf dist .turbo"
@@ -22,6 +22,7 @@
     "@datarover/shared": "workspace:*"
   },
   "devDependencies": {
+    "dotenv-cli": "^11.0.0",
     "tsup": "^8.3.5",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",

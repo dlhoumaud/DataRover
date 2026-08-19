@@ -1,5 +1,6 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "concurrency": "11",
   "globalPassThroughEnv": [
     "DATABASE_URL",
     "POSTGRES_HOST",
@@ -45,6 +46,7 @@
       "outputs": []
     },
     "dev": {
+      "dependsOn": ["^build"],
       "cache": false,
       "persistent": true
     },
