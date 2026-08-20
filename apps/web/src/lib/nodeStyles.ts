@@ -13,6 +13,7 @@ export const NODE_COLORS: Record<ActionNode["type"], string> = {
   stop: "bg-red-500",
   dataTransform: "bg-teal-500",
   textCrypto: "bg-orange-500",
+  loop: "bg-pink-500",
 };
 
 export const NODE_LABELS: Record<ActionNode["type"], string> = {
@@ -23,4 +24,5 @@ export const NODE_LABELS: Record<ActionNode["type"], string> = {
   stop: "stop",
   dataTransform: "Traitement",
   textCrypto: "textCrypto",
+  loop: "Boucle",
 };

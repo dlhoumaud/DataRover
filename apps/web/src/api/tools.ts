@@ -9,7 +9,7 @@ import type {
 
 /**
  * Both hooks back the editor's "Prévisualiser & sélectionner" tool
- * (Specs.md §6/§8, see HtmlPreviewSelector). Neither is a resource with an
+ * (Specs.md §6/§8, see PreviewSelector). Neither is a resource with an
  * identity worth caching — each call is a one-shot action triggered by an
  * explicit user gesture (open the preview, click a candidate element) — so,
  * unlike src/api/workflows.ts and src/api/executions.ts, there is no

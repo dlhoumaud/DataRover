@@ -4,6 +4,7 @@ import {
   ConditionNodeSchema,
   ExtractNodeSchema,
   HttpNodeSchema,
+  LoopNodeSchema,
   SetVariableNodeSchema,
   StopNodeSchema,
   TextCryptoNodeSchema,
@@ -410,6 +411,59 @@ describe("TextCryptoNodeSchema", () => {
   });
 });
 
+describe("LoopNodeSchema", () => {
+  it("parses a valid loop node, defaulting outputMode to list", () => {
+    const result = LoopNodeSchema.parse({
+      id: "n8",
+      name: "For each product",
+      type: "loop",
+      source: "{{ actions.extract1.output.items }}",
+      body: [{ id: "n8Step1", name: "Capture", type: "setVariable", variables: { seen: "{{ item }}" } }],
+    });
+    expect(result.outputMode).toBe("list");
+    expect(result.body).toHaveLength(1);
+  });
+
+  it("accepts an explicit outputMode and a multi-step body", () => {
+    const result = LoopNodeSchema.parse({
+      id: "n8",
+      name: "For each product",
+      type: "loop",
+      source: "{{ global.items }}",
+      outputMode: "last",
+      body: [
+        { id: "n8Step1", name: "Fetch detail", type: "http", method: "GET", url: "{{ item }}" },
+        {
+          id: "n8Step2",
+          name: "Extract price",
+          type: "extract",
+          source: "n8Step1",
+          sourceType: "json",
+          rules: [{ name: "price", strategy: "jsonpath", selectors: ["$.price"] }],
+        },
+      ],
+    });
+    expect(result.outputMode).toBe("last");
+    expect(result.body).toHaveLength(2);
+  });
+
+  it("rejects an empty body", () => {
+    const input = { id: "n8", name: "Empty", type: "loop", source: "{{ global.items }}", body: [] };
+    expect(LoopNodeSchema.safeParse(input).success).toBe(false);
+  });
+
+  it.each(["condition", "stop", "loop"])("rejects a body step of type %s", (type) => {
+    const bodyStep =
+      type === "condition"
+        ? { id: "s1", name: "Cond", type: "condition", expression: "true" }
+        : type === "stop"
+          ? { id: "s1", name: "Stop", type: "stop" }
+          : { id: "s1", name: "Nested loop", type: "loop", source: "{{ item }}", body: [] };
+    const input = { id: "n8", name: "Bad body", type: "loop", source: "{{ global.items }}", body: [bodyStep] };
+    expect(LoopNodeSchema.safeParse(input).success).toBe(false);
+  });
+});
+
 describe("ActionNodeSchema (discriminated union)", () => {
   const validByType: Record<string, unknown> = {
     http: {
@@ -457,6 +511,13 @@ describe("ActionNodeSchema (discriminated union)", () => {
       type: "textCrypto",
       input: "x",
       operations: [{ type: "hash", algorithm: "md5" }],
+    },
+    loop: {
+      id: "n8",
+      name: "Loop",
+      type: "loop",
+      source: "{{ global.items }}",
+      body: [{ id: "n8Step1", name: "Capture", type: "setVariable", variables: {} }],
     },
   };
 

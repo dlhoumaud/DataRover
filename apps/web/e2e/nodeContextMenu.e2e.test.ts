@@ -73,7 +73,7 @@ describe("node palette colors, new node types, and the node context menu", () =>
     }
 
     // 3. Add a "Traitement" (dataTransform) node and edit it in its own inspector
-    await driver.findElement(By.xpath("//button[contains(.,'+ Traitement')]")).click();
+    await driver.findElement(By.xpath("//button[contains(.,'Traitement')]")).click();
     const textNode = await driver.wait(
       until.elementLocated(By.xpath("//*[contains(text(),'New Traitement')]")),
       TIMEOUT,
@@ -88,7 +88,7 @@ describe("node palette colors, new node types, and the node context menu", () =>
     await driver.wait(until.elementLocated(By.xpath("//option[@value='trim']")), TIMEOUT);
 
     // 4. Add a "Crypto / Encodage" (textCrypto) node and confirm its inspector opens with a hash op
-    await driver.findElement(By.xpath("//button[contains(.,'+ Crypto')]")).click();
+    await driver.findElement(By.xpath("//button[contains(.,'Crypto')]")).click();
     const cryptoNode = await driver.wait(
       until.elementLocated(By.xpath("//*[contains(text(),'New Crypto')]")),
       TIMEOUT,
@@ -97,7 +97,7 @@ describe("node palette colors, new node types, and the node context menu", () =>
     await driver.wait(until.elementLocated(By.xpath("//option[@value='sha256']")), TIMEOUT);
 
     // 5. Add an HTTP node, then exercise the custom right-click context menu on it
-    await driver.findElement(By.xpath("//button[contains(.,'+ HTTP')]")).click();
+    await driver.findElement(By.xpath("//button[contains(.,'HTTP')]")).click();
     await driver.findElement(By.css(".react-flow__controls-fitview")).click();
     await driver.sleep(300);
     const httpNode = await driver.wait(

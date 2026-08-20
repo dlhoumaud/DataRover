@@ -2,6 +2,7 @@ import type {
   ActionResult,
   ExecutionStatus,
   ExtractOutputType,
+  ExtractSourceType,
   HttpMethod,
   WorkflowDefinition,
 } from "@datarover/workflow-types";
@@ -135,7 +136,8 @@ export interface SelectorScoreDto {
 }
 
 export interface TestSelectorInput {
-  html: string;
+  source: string;
+  sourceType?: ExtractSourceType;
   selectors: string[];
   output?: ExtractOutputType;
   attribute?: string;

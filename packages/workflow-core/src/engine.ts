@@ -14,10 +14,16 @@ import { conditionExecutor } from "./executors/conditionExecutor.js";
 import { dataTransformExecutor } from "./executors/dataTransformExecutor.js";
 import { extractExecutor } from "./executors/extractExecutor.js";
 import { httpExecutor } from "./executors/httpExecutor.js";
+import { loopExecutor } from "./executors/loopExecutor.js";
 import { setVariableExecutor } from "./executors/setVariableExecutor.js";
 import { stopExecutor } from "./executors/stopExecutor.js";
 import { textCryptoExecutor } from "./executors/textCryptoExecutor.js";
-import type { EngineVariables, NodeExecutionContext, NodeExecutor } from "./executors/types.js";
+import type {
+  EngineVariables,
+  NodeExecutionContext,
+  NodeExecutionResult,
+  NodeExecutor,
+} from "./executors/types.js";
 import { getNextNodeId, getNodeById, validateDefinition } from "./graph.js";
 import { withRetry, withTimeout } from "./retry.js";
 
@@ -46,8 +52,8 @@ function nowIso(): string {
 /**
  * Executes `WorkflowDefinition` graphs.
  *
- * Ships with seven default node executors (`http`, `extract`, `condition`,
- * `setVariable`, `stop`, `dataTransform`, `textCrypto`); pass `executors` to
+ * Ships with eight default node executors (`http`, `extract`, `condition`,
+ * `setVariable`, `stop`, `dataTransform`, `textCrypto`, `loop`); pass `executors` to
  * the constructor to override or extend that registry (e.g. to add a
  * `"browser"` executor in a future version) without needing to modify this
  * class.
@@ -64,6 +70,7 @@ export class WorkflowEngine {
       stop: stopExecutor as NodeExecutor,
       dataTransform: dataTransformExecutor as NodeExecutor,
       textCrypto: textCryptoExecutor as NodeExecutor,
+      loop: loopExecutor as NodeExecutor,
     };
     this.executors = { ...defaults, ...options?.executors } as Record<string, NodeExecutor>;
   }
@@ -130,6 +137,24 @@ export class WorkflowEngine {
       actions: actionsOutput,
     });
 
+    // Lets an executor (currently only `loopExecutor`, for its embedded body steps) recursively
+    // run another node through this same engine's executor dispatch/retry/timeout logic, without
+    // that executor needing to duplicate any of it. Deliberately does not touch
+    // `execution.actionResults`/`logs`/`emit` — those are the graph-level, one-entry-per-node view;
+    // a loop body step can run many times (once per iteration) under the same node id, which would
+    // make actionResults's implicit nodeId-per-entry assumption misleading, so per-iteration detail
+    // stays out of that public log and only the loop node's own single result is recorded there.
+    const runNode = async (
+      node: ActionNode,
+      nodeCtx: NodeExecutionContext,
+    ): Promise<NodeExecutionResult> => {
+      const executor = this.executors[node.type];
+      if (executor === undefined) {
+        throw new Error(`No executor registered for node type "${node.type}"`);
+      }
+      return withRetry(async () => withTimeout(() => executor(node, nodeCtx), node.timeoutMs), node.retryPolicy);
+    };
+
     const runStartedAt = Date.now();
     let currentNodeId: string | undefined = definition.startNodeId;
     let steps = 0;
@@ -165,6 +190,7 @@ export class WorkflowEngine {
         variables,
         actionsOutput,
         logger,
+        runNode,
       };
 
       const startedAt = nowIso();

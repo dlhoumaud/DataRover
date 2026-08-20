@@ -1,36 +1,69 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ExtractionRule, ExtractOutputType, HttpMethod } from "@datarover/workflow-types";
+import { XMLParser } from "fast-xml-parser";
+import type {
+  ExtractionRule,
+  ExtractOutputType,
+  ExtractSourceType,
+  HttpMethod,
+  HttpNode,
+} from "@datarover/workflow-types";
 import { usePreviewHtml, useTestSelector } from "../api/tools";
 import { buildSandboxedDocument, isElementSelectedMessage } from "../lib/htmlSandbox";
+import { buildJsonPath } from "../lib/jsonPath";
+import { JsonTreeView } from "./JsonTreeView";
 import type { SelectorScoreDto } from "../api/types";
 
 /** Waited out after every keystroke in a candidate field before re-testing it against the API. */
 const EDIT_DEBOUNCE_MS = 400;
 
 /**
- * The "Prévisualiser & sélectionner" tool (Specs.md §6/§8): fetches the
- * target http node's page, renders it in a sandboxed iframe (see
- * htmlSandbox.ts for the security model — no script from the fetched page
- * ever runs), lets the user click an element to get scored selector
- * candidates, and accumulates validated rules into one or more extraction
- * rules the caller turns into an `extract` node.
- *
- * Candidate selectors are auto-computed client-side from the clicked
- * element (id, data-*, class, ...) but are always shown as **editable**
- * text fields, not read-only choices: on some real sites (generic markup —
- * a plain `<div>` with no id/class/data-* to anchor on, common on pages
- * that don't bother with semantic tags) the auto-computed fallback can miss
- * or mismatch once the same page is re-parsed by the backend's extractor,
- * so the user can hand-fix or add a selector and immediately see it
- * re-scored and re-tested rather than being stuck with a dead end.
+ * Same attribute-prefix convention used everywhere else parsed XML flows through this app
+ * (`packages/extractor`'s xmlExtractor, `dataTransformExecutor`) — kept identical here purely for
+ * the client-side tree *display*; the actual extraction always re-parses the raw XML text
+ * server-side (see runSelectorTest below), so a mismatch here could never silently break a rule,
+ * only make the tree's own on-screen keys inconsistent with what jsonpath-plus would report.
  */
-export function HtmlPreviewSelector({
+const XML_PARSER_OPTIONS = {
+  ignoreAttributes: false,
+  attributeNamePrefix: "attr_",
+  textNodeName: "#text",
+  trimValues: true,
+  parseTagValue: true,
+  parseAttributeValue: true,
+};
+
+/**
+ * Response types the preview tool can render as a structured, clickable surface. "text" still
+ * gets a readable (but non-selectable — there's no structure to click into) preview; "file" has no
+ * button to open this at all (see HttpNodeInspector).
+ */
+function sourceTypeFor(responseType: HttpNode["responseType"]): ExtractSourceType | null {
+  if (responseType === "html" || responseType === "json" || responseType === "xml") {
+    return responseType;
+  }
+  return null;
+}
+
+/**
+ * The "Prévisualiser & sélectionner" tool (Specs.md §6/§8, extended beyond HTML to JSON/XML):
+ * fetches the target http node's response and renders it as a structured, clickable surface —
+ * a sandboxed iframe for HTML (see htmlSandbox.ts for the security model: no script from the
+ * fetched page ever runs) or a syntax-highlighted collapsible tree for JSON/XML (JsonTreeView,
+ * which needs no sandboxing at all since it only ever renders plain data as React text, never
+ * markup from the target site). Clicking an element/node computes selector candidates — CSS
+ * selectors with a robustness score for HTML, a single canonical JSONPath for JSON/XML — shown as
+ * **editable** fields so the user can hand-fix or add a fallback selector and see it re-scored
+ * live. Validated rules accumulate until "Terminer" hands them all to the caller at once, along
+ * with the `sourceType` the caller needs to tag the new `extract` node with.
+ */
+export function PreviewSelector({
   projectId,
   method,
   url,
   headers,
   queryParams,
   body,
+  responseType,
   onClose,
   onValidate,
 }: {
@@ -40,30 +73,37 @@ export function HtmlPreviewSelector({
   headers?: Record<string, string>;
   queryParams?: Record<string, string>;
   body?: unknown;
+  responseType: HttpNode["responseType"];
   onClose: () => void;
-  onValidate: (rules: ExtractionRule[]) => void;
+  onValidate: (rules: ExtractionRule[], sourceType: ExtractSourceType) => void;
 }): JSX.Element {
+  const sourceType = sourceTypeFor(responseType);
+  const canSelect = sourceType !== null;
+
   const preview = usePreviewHtml();
   const testSelector = useTestSelector();
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [accumulatedRules, setAccumulatedRules] = useState<ExtractionRule[]>([]);
-  const [selectedTag, setSelectedTag] = useState<string | null>(null);
+  const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
+  const [selectedPathKey, setSelectedPathKey] = useState<string | null>(null);
   const [candidates, setCandidates] = useState<string[]>([]);
   const [ruleName, setRuleName] = useState("");
-  const [output, setOutput] = useState<ExtractOutputType>("text");
+  const [output, setOutput] = useState<ExtractOutputType>(sourceType === "html" ? "text" : "value");
   const [attribute, setAttribute] = useState("");
   // Off by default (fast path — a plain fetch): only meaningful for targets whose real content
   // only exists after client-side JS runs (a SPA shell with no server-rendered markup — verified
   // against a real reported page with no <h1> anywhere in its plain-fetched HTML). Toggling it
   // re-fetches via a real headless browser server-side instead (BrowserRendererService) — slower,
-  // and GET-only, so it's an explicit opt-in rather than the default for every preview.
+  // and GET-only, so it's an explicit opt-in rather than the default for every preview. Only
+  // meaningful for HTML — JSON/XML APIs don't have a client-side rendering step to wait out.
   const [render, setRender] = useState(false);
 
   useEffect(() => {
     preview.mutate({ projectId, method, url, headers, queryParams, body, render });
-    setSelectedTag(null);
+    setSelectedLabel(null);
+    setSelectedPathKey(null);
     setCandidates([]);
     // Intentionally re-runs only when the http node's own request shape (or the render toggle)
     // changes, not on every re-render (preview/testSelector are mutation objects that change
@@ -81,27 +121,43 @@ export function HtmlPreviewSelector({
   );
 
   const sandboxedDocument = useMemo(() => {
-    if (!preview.data) {
+    if (!preview.data || sourceType !== "html") {
       return null;
     }
     return buildSandboxedDocument(preview.data.html, preview.data.url);
-  }, [preview.data]);
+  }, [preview.data, sourceType]);
+
+  const parsedData = useMemo((): { value: unknown } | { error: string } | null => {
+    if (!preview.data || sourceType === "html" || sourceType === null) {
+      return null;
+    }
+    try {
+      if (sourceType === "json") {
+        return { value: JSON.parse(preview.data.html) };
+      }
+      const parser = new XMLParser(XML_PARSER_OPTIONS);
+      return { value: parser.parse(preview.data.html) };
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  }, [preview.data, sourceType]);
 
   /**
-   * Tests every non-empty candidate together in one call — the backend
-   * (`extractWithCss`) reports a score for each and picks the first one
-   * that actually matches, so "Aperçu du résultat" stays correct even
-   * while the user is mid-edit on some other, currently-broken row.
-   * `outputOverride`/`attributeOverride` let callers pass a not-yet-committed
-   * value (e.g. from the very `onChange` that's about to call `setOutput`)
-   * without waiting for a re-render.
+   * Tests every non-empty candidate together in one call — the backend (`extractWithCss` /
+   * `extractWithJsonPath` / `extractWithXml`, dispatched by `sourceType`) reports a score for each
+   * and picks the first one that actually matches, so "Aperçu du résultat" stays correct even
+   * while the user is mid-edit on some other, currently-broken row. `source` is always the raw
+   * fetched text, never a re-serialized version of the client-side parsed tree — for XML in
+   * particular this means the backend re-parses from scratch, exactly like a real `extract` node
+   * would. `outputOverride`/`attributeOverride` let callers pass a not-yet-committed value (e.g.
+   * from the very `onChange` that's about to call `setOutput`) without waiting for a re-render.
    */
   function runSelectorTest(
     selectors: string[],
     outputOverride?: ExtractOutputType,
     attributeOverride?: string,
   ): void {
-    if (!preview.data) {
+    if (!preview.data || !sourceType) {
       return;
     }
     const nonEmpty = selectors.map((selector) => selector.trim()).filter((selector) => selector.length > 0);
@@ -111,7 +167,8 @@ export function HtmlPreviewSelector({
     const effectiveOutput = outputOverride ?? output;
     const effectiveAttribute = attributeOverride ?? attribute;
     testSelector.mutate({
-      html: preview.data.html,
+      source: preview.data.html,
+      sourceType,
       selectors: nonEmpty,
       output: effectiveOutput,
       attribute: effectiveOutput === "attribute" ? effectiveAttribute : undefined,
@@ -127,7 +184,11 @@ export function HtmlPreviewSelector({
     }, EDIT_DEBOUNCE_MS);
   }
 
+  // HTML: the picker script running inside the sandboxed iframe reports a click via postMessage.
   useEffect(() => {
+    if (sourceType !== "html") {
+      return;
+    }
     function handleMessage(event: MessageEvent): void {
       if (event.source !== iframeRef.current?.contentWindow) {
         return;
@@ -138,7 +199,8 @@ export function HtmlPreviewSelector({
       if (debounceRef.current) {
         clearTimeout(debounceRef.current);
       }
-      setSelectedTag(event.data.tagName);
+      setSelectedLabel(event.data.tagName);
+      setSelectedPathKey(null);
       setCandidates(event.data.selectors);
       setRuleName((current) => (current.length > 0 ? current : event.data.tagName));
       runSelectorTest(event.data.selectors);
@@ -146,7 +208,23 @@ export function HtmlPreviewSelector({
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preview.data, output, attribute]);
+  }, [sourceType, preview.data, output, attribute]);
+
+  // JSON/XML: a click inside JsonTreeView reports a path directly (no postMessage needed — it's
+  // a plain React tree in this same document, not a sandboxed iframe).
+  function handleTreeSelect(path: Array<string | number>, _value: unknown): void {
+    const jsonPath = buildJsonPath(path);
+    const lastSegment = path.at(-1);
+    const label = lastSegment === undefined ? "racine" : String(lastSegment);
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+    }
+    setSelectedLabel(label);
+    setSelectedPathKey(path.join(" "));
+    setCandidates([jsonPath]);
+    setRuleName((current) => (current.length > 0 ? current : label));
+    runSelectorTest([jsonPath]);
+  }
 
   function handleCandidateChange(index: number, value: string): void {
     const updated = candidates.map((candidate, i) => (i === index ? value : candidate));
@@ -187,7 +265,7 @@ export function HtmlPreviewSelector({
   const matchedSelector = testSelector.data?.matchedSelector;
 
   function handleAddRule(): void {
-    if (!matchedSelector || ruleName.trim().length === 0) {
+    if (!matchedSelector || ruleName.trim().length === 0 || !sourceType) {
       return;
     }
     // Every currently-working candidate becomes part of the rule's fallback chain (that's what
@@ -201,63 +279,75 @@ export function HtmlPreviewSelector({
     );
     const rule: ExtractionRule = {
       name: ruleName.trim(),
-      strategy: "css",
+      strategy: sourceType === "html" ? "css" : "jsonpath",
       selectors: ordered.length > 0 ? ordered : [matchedSelector],
       output,
       attribute: output === "attribute" && attribute.trim().length > 0 ? attribute.trim() : undefined,
     };
     setAccumulatedRules((current) => [...current, rule]);
-    setSelectedTag(null);
+    setSelectedLabel(null);
+    setSelectedPathKey(null);
     setCandidates([]);
     setRuleName("");
   }
 
   function handleFinish(): void {
-    if (accumulatedRules.length === 0) {
+    if (accumulatedRules.length === 0 || !sourceType) {
       return;
     }
-    onValidate(accumulatedRules);
+    onValidate(accumulatedRules, sourceType);
   }
+
+  const outputOptions: ExtractOutputType[] =
+    sourceType === "html" ? ["text", "attribute", "list", "table", "value"] : ["value", "list"];
+
+  const elementLabel = sourceType === "html" ? "Élément cliqué" : "Chemin cliqué";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-2">
       <div className="flex h-full w-full overflow-hidden rounded-lg bg-white shadow-xl">
         <div className="flex flex-1 flex-col border-r border-gray-200">
           <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2">
-            <h2 className="text-sm font-semibold text-gray-900">Aperçu — cliquez un élément à extraire</h2>
+            <h2 className="text-sm font-semibold text-gray-900">
+              {canSelect
+                ? "Aperçu — cliquez un élément à extraire"
+                : "Aperçu"}
+            </h2>
             {preview.data && (
               <span className="truncate text-xs text-gray-400">{preview.data.url}</span>
             )}
           </div>
-          <div className="flex items-center gap-2 border-b border-gray-200 bg-gray-50 px-4 py-1.5">
-            <label className="flex items-center gap-1.5 text-xs text-gray-700">
-              <input
-                type="checkbox"
-                checked={render}
-                onChange={(event) => setRender(event.target.checked)}
-              />
-              Rendu JavaScript (pages React/Vue…)
-            </label>
-            <span className="text-xs text-gray-400">
-              — plus lent (navigateur headless côté serveur), pour les pages dont le contenu
-              n&apos;existe qu&apos;après exécution du script.
-            </span>
-          </div>
+          {sourceType === "html" && (
+            <div className="flex items-center gap-2 border-b border-gray-200 bg-gray-50 px-4 py-1.5">
+              <label className="flex items-center gap-1.5 text-xs text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={render}
+                  onChange={(event) => setRender(event.target.checked)}
+                />
+                Rendu JavaScript (pages React/Vue…)
+              </label>
+              <span className="text-xs text-gray-400">
+                — plus lent (navigateur headless côté serveur), pour les pages dont le contenu
+                n&apos;existe qu&apos;après exécution du script.
+              </span>
+            </div>
+          )}
           <div className="flex-1 overflow-auto bg-gray-50">
             {preview.isPending && (
               <p className="p-4 text-sm text-gray-500">
                 {render
                   ? "Rendu de la page dans un navigateur headless… (jusqu'à 20 secondes)"
-                  : "Chargement de la page…"}
+                  : "Chargement…"}
               </p>
             )}
             {preview.isError && (
               <p className="p-4 text-sm text-red-600">
-                Impossible de charger la page :{" "}
+                Impossible de charger la réponse :{" "}
                 {preview.error instanceof Error ? preview.error.message : "erreur inconnue"}
               </p>
             )}
-            {sandboxedDocument && (
+            {sourceType === "html" && sandboxedDocument && (
               <iframe
                 ref={iframeRef}
                 title="Aperçu de la page cible"
@@ -265,6 +355,29 @@ export function HtmlPreviewSelector({
                 sandbox="allow-scripts"
                 className="h-full w-full border-0 bg-white"
               />
+            )}
+            {(sourceType === "json" || sourceType === "xml") && parsedData && "error" in parsedData && (
+              <div className="p-4">
+                <p className="mb-2 text-sm text-red-600">
+                  Impossible d&apos;analyser la réponse comme {sourceType.toUpperCase()} :{" "}
+                  {parsedData.error}
+                </p>
+                <pre className="max-h-96 overflow-auto rounded-md bg-gray-900 p-3 text-xs text-gray-100">
+                  {preview.data?.html}
+                </pre>
+              </div>
+            )}
+            {(sourceType === "json" || sourceType === "xml") && parsedData && "value" in parsedData && (
+              <JsonTreeView
+                value={parsedData.value}
+                onSelect={handleTreeSelect}
+                activePathKey={selectedPathKey}
+              />
+            )}
+            {sourceType === null && preview.data && (
+              <pre className="max-h-full overflow-auto whitespace-pre-wrap p-4 text-xs text-gray-800">
+                {preview.data.html}
+              </pre>
             )}
           </div>
         </div>
@@ -296,19 +409,26 @@ export function HtmlPreviewSelector({
               </div>
             )}
 
-            {selectedTag === null ? (
+            {!canSelect ? (
+              <p className="text-sm text-gray-400">
+                La sélection d&apos;élément n&apos;est pas disponible pour ce type de contenu —
+                l&apos;aperçu ci-contre reste utile pour lire la réponse brute.
+              </p>
+            ) : selectedLabel === null ? (
               <p className="text-sm text-gray-400">
                 Cliquez un élément dans l&apos;aperçu pour proposer des sélecteurs.
               </p>
             ) : (
               <div className="space-y-3">
                 <p className="text-xs text-gray-500">
-                  Élément cliqué : <span className="font-mono">{selectedTag}</span>
+                  {elementLabel} : <span className="font-mono">{selectedLabel}</span>
                 </p>
 
                 <div>
                   <div className="mb-1 flex items-center justify-between">
-                    <p className="text-xs font-semibold uppercase text-gray-500">Sélecteurs candidats</p>
+                    <p className="text-xs font-semibold uppercase text-gray-500">
+                      {sourceType === "html" ? "Sélecteurs candidats" : "Chemins candidats (JSONPath)"}
+                    </p>
                     <button
                       type="button"
                       onClick={handleAddCandidate}
@@ -334,7 +454,7 @@ export function HtmlPreviewSelector({
                           <input
                             value={candidate}
                             onChange={(event) => handleCandidateChange(index, event.target.value)}
-                            placeholder="sélecteur CSS"
+                            placeholder={sourceType === "html" ? "sélecteur CSS" : "$.chemin.jsonpath"}
                             className="min-w-0 flex-1 bg-transparent font-mono text-xs focus:outline-none"
                           />
                           {score && (
@@ -374,11 +494,11 @@ export function HtmlPreviewSelector({
                       onChange={(event) => handleOutputChange(event.target.value as ExtractOutputType)}
                       className="mt-1 w-full rounded-md border border-gray-300 px-2 py-1 text-sm"
                     >
-                      <option value="text">text</option>
-                      <option value="attribute">attribute</option>
-                      <option value="list">list</option>
-                      <option value="table">table</option>
-                      <option value="value">value</option>
+                      {outputOptions.map((option) => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ))}
                     </select>
                   </div>
                   {output === "attribute" && (

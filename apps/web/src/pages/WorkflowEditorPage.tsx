@@ -12,7 +12,12 @@ import {
   type NodeMouseHandler,
   type OnConnect,
 } from "@xyflow/react";
-import type { ActionNode, ExtractionRule, WorkflowDefinition } from "@datarover/workflow-types";
+import type {
+  ActionNode,
+  ExtractionRule,
+  ExtractSourceType,
+  WorkflowDefinition,
+} from "@datarover/workflow-types";
 import { useWorkflow, useUpdateWorkflow, useDeleteWorkflow } from "../api/workflows";
 import { useCreateExecution } from "../api/executions";
 import {
@@ -149,12 +154,12 @@ export function WorkflowEditorPage(): JSX.Element {
   );
 
   /**
-   * Turns the rules validated in HtmlPreviewSelector (Specs.md §6/§8) into
+   * Turns the rules validated in PreviewSelector (Specs.md §6/§8, extended to JSON/XML) into
    * a new `extract` node wired by an edge from the http node that was
    * being previewed, and selects it — mirrors handleAddNode's id
    * generation / positioning conventions.
    */
-  function handleCreateExtractNode(rules: ExtractionRule[]): void {
+  function handleCreateExtractNode(rules: ExtractionRule[], sourceType: ExtractSourceType): void {
     if (!selectedNodeId) {
       return;
     }
@@ -169,7 +174,7 @@ export function WorkflowEditorPage(): JSX.Element {
       name: "New Extraction",
       type: "extract",
       source: selectedNodeId,
-      sourceType: "html",
+      sourceType,
       rules,
     };
     const position = { x: sourceNode.position.x + 260, y: sourceNode.position.y };

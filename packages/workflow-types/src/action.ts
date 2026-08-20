@@ -278,6 +278,56 @@ export const TextCryptoNodeSchema = BaseNodeSchema.extend({
 });
 export type TextCryptoNode = z.infer<typeof TextCryptoNodeSchema>;
 
+/**
+ * Node types allowed inside a `loop` node's body (Specs.md §9.5's "FOR EACH", scoped down — see
+ * `LoopNodeSchema` below). Deliberately excludes:
+ * - `condition`: a body step is a linear sequence, not a branching target — `Edge.branch` has
+ *   nothing to attach to inside an embedded body.
+ * - `stop`: would end the *entire workflow* mid-iteration, which is never what "skip this item" or
+ *   "break the loop" mean; neither is supported in this iteration.
+ * - `loop`: no nested loops in this iteration — keeps the embedded-body model (see below) from
+ *   needing its own recursive UI/validation story.
+ */
+export const LoopBodyNodeSchema = z.discriminatedUnion("type", [
+  HttpNodeSchema,
+  ExtractNodeSchema,
+  DataTransformNodeSchema,
+  TextCryptoNodeSchema,
+  SetVariableNodeSchema,
+]);
+export type LoopBodyNode = z.infer<typeof LoopBodyNodeSchema>;
+
+export const LoopOutputMode = z.enum(["list", "last"]);
+export type LoopOutputMode = z.infer<typeof LoopOutputMode>;
+
+/**
+ * Iterates over an array, running `body` (a small, linear, ordered sequence of steps — never a
+ * graph-visible branch with a back-edge) once per element. Deliberately an **embedded body**
+ * rather than a set of ordinary graph nodes wired back to this one: the engine's cycle detection
+ * and step traversal (`validateDefinition`, `getNextNodeId`, `DEFAULT_MAX_STEPS`) stay untouched,
+ * since a loop never introduces an actual cycle into the graph itself.
+ *
+ * Each iteration gets `{{ item }}` (the current element) and `{{ runtime.index }}` /
+ * `{{ runtime.isFirst }}` / `{{ runtime.isLast }}` bound into the expression context — these are
+ * pre-existing, generically-resolvable slots (see `ExpressionContext`), not new plumbing. There is
+ * no configurable "variable name": every body step reads the current item via the fixed `item`
+ * name, the same way every node already reads prior outputs via the fixed `actions` name.
+ *
+ * `source` is interpolated and must resolve to an array (a config mistake here is loud, not
+ * silently coerced). `outputMode` picks what the loop node itself contributes downstream:
+ * "list" collects every iteration's last body-step output; "last" keeps only the final one.
+ * Either way, only the loop's own output crosses back into the outer scope — body-step outputs
+ * are loop-local, so a downstream node is never left guessing which iteration's value a body
+ * step's id would refer to.
+ */
+export const LoopNodeSchema = BaseNodeSchema.extend({
+  type: z.literal("loop"),
+  source: z.string(),
+  body: z.array(LoopBodyNodeSchema).min(1),
+  outputMode: LoopOutputMode.default("list"),
+});
+export type LoopNode = z.infer<typeof LoopNodeSchema>;
+
 export const ActionNodeSchema = z.discriminatedUnion("type", [
   HttpNodeSchema,
   ExtractNodeSchema,
@@ -286,6 +336,7 @@ export const ActionNodeSchema = z.discriminatedUnion("type", [
   StopNodeSchema,
   DataTransformNodeSchema,
   TextCryptoNodeSchema,
+  LoopNodeSchema,
 ]);
 export type ActionNode = z.infer<typeof ActionNodeSchema>;
 

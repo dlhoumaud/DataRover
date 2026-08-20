@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable } from "@nestjs/common";
 import { request } from "undici";
 import { interpolate, type ExpressionContext } from "@datarover/expression-engine";
-import { extractWithCss, type ExtractionOutcome } from "@datarover/extractor";
+import { extractWithCss, extractWithJsonPath, extractWithXml, type ExtractionOutcome } from "@datarover/extractor";
 import { PrismaService } from "../prisma/prisma.service";
 import { BrowserRendererService } from "./browser-renderer.service";
 import type { PreviewAssetDto, PreviewHtmlDto, TestSelectorDto } from "./dto";
@@ -119,8 +119,41 @@ export class ToolsService {
     }
   }
 
+  /**
+   * Dispatches by `sourceType` exactly like `@datarover/extractor`'s own `extract()` — the CSS
+   * path for "html" (unchanged), and the JSONPath-backed paths for "json"/"xml" that back the
+   * preview tool's JSON/XML tree view (Specs.md §6, extended beyond HTML). `source` is always the
+   * raw fetched body text; "json"/"xml" are parsed here, the same way a real `extract` node would.
+   */
   testSelector(input: TestSelectorDto): ExtractionOutcome {
-    return extractWithCss(input.html, {
+    if (input.sourceType === "json") {
+      let data: unknown;
+      try {
+        data = JSON.parse(input.source);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new BadRequestException(`Invalid JSON source: ${message}`);
+      }
+      return extractWithJsonPath(data, {
+        name: "preview",
+        strategy: "jsonpath",
+        selectors: input.selectors,
+        output: input.output ?? "list",
+        attribute: input.attribute,
+      });
+    }
+
+    if (input.sourceType === "xml") {
+      return extractWithXml(input.source, {
+        name: "preview",
+        strategy: "jsonpath",
+        selectors: input.selectors,
+        output: input.output ?? "list",
+        attribute: input.attribute,
+      });
+    }
+
+    return extractWithCss(input.source, {
       name: "preview",
       strategy: "css",
       selectors: input.selectors,

@@ -1,6 +1,6 @@
 /**
  * Builds the sandboxed document injected into the picker iframe's `srcDoc`
- * (see HtmlPreviewSelector). This is the security boundary described in
+ * (see PreviewSelector). This is the security boundary described in
  * Specs.md §6: HTML fetched from a target site is never trusted to run its
  * own script inside our app.
  *
@@ -17,7 +17,7 @@
  *   author ourselves — never anything sourced from the fetched page.
  *
  * The iframe itself must be rendered with `sandbox="allow-scripts"` and
- * WITHOUT `allow-same-origin` (see HtmlPreviewSelector) so PICKER_SCRIPT
+ * WITHOUT `allow-same-origin` (see PreviewSelector) so PICKER_SCRIPT
  * runs in an opaque origin: even a handler that slipped through
  * sanitization could not reach the app's cookies/storage or its parent
  * window directly. Communication back to the parent goes exclusively

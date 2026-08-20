@@ -9,6 +9,7 @@ const NODE_TYPE_BUTTONS: ReadonlyArray<{ type: ActionNode["type"]; label: string
   { type: "stop", label: "Stop" },
   { type: "dataTransform", label: "Traitement" },
   { type: "textCrypto", label: "Crypto / Encodage" },
+  { type: "loop", label: "Boucle" },
 ];
 
 export function NodePalette({
@@ -29,7 +30,7 @@ export function NodePalette({
             className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${NODE_COLORS[button.type]}`}
             aria-hidden="true"
           />
-          + {button.label}
+          {button.label}
         </button>
       ))}
     </div>

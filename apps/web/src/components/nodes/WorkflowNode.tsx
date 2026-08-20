@@ -81,4 +81,5 @@ export const nodeTypes = {
   stop: WorkflowNode,
   dataTransform: WorkflowNode,
   textCrypto: WorkflowNode,
+  loop: WorkflowNode,
 };

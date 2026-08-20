@@ -208,12 +208,12 @@ describe("Tools", () => {
   });
 
   describe("POST /tools/test-selector", () => {
-    it("scores every candidate selector and returns the value from the first one that matches", async () => {
+    it("scores every candidate CSS selector and returns the value from the first one that matches (sourceType defaults to html)", async () => {
       const response = await app.getHttpAdapter().getInstance().inject({
         method: "POST",
         url: "/tools/test-selector",
         payload: {
-          html: FIXTURE_HTML,
+          source: FIXTURE_HTML,
           selectors: ["div > span:nth-child(3)", '[data-testid="title"]', ".product-card .title"],
           output: "list",
         },
@@ -237,9 +237,51 @@ describe("Tools", () => {
       const response = await app.getHttpAdapter().getInstance().inject({
         method: "POST",
         url: "/tools/test-selector",
-        payload: { html: FIXTURE_HTML, selectors: [] },
+        payload: { source: FIXTURE_HTML, selectors: [] },
       });
       expect(response.statusCode).toBe(400);
+    });
+
+    it("evaluates a JSONPath selector when sourceType is json, parsing the raw source itself", async () => {
+      const response = await app.getHttpAdapter().getInstance().inject({
+        method: "POST",
+        url: "/tools/test-selector",
+        payload: {
+          source: JSON.stringify({ items: [{ price: 19.99 }, { price: 29.99 }] }),
+          sourceType: "json",
+          selectors: ["$.items[1].price"],
+          output: "value",
+        },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.payload) as { value: unknown; matchedSelector: string };
+      expect(body.value).toBe(29.99);
+      expect(body.matchedSelector).toBe("$.items[1].price");
+    });
+
+    it("returns 400 for an invalid JSON source", async () => {
+      const response = await app.getHttpAdapter().getInstance().inject({
+        method: "POST",
+        url: "/tools/test-selector",
+        payload: { source: "{not valid json", sourceType: "json", selectors: ["$.a"] },
+      });
+      expect(response.statusCode).toBe(400);
+    });
+
+    it("parses XML and evaluates a JSONPath selector (including an attribute) when sourceType is xml", async () => {
+      const response = await app.getHttpAdapter().getInstance().inject({
+        method: "POST",
+        url: "/tools/test-selector",
+        payload: {
+          source: `<catalog><product id="p1"><price>19.99</price></product></catalog>`,
+          sourceType: "xml",
+          selectors: ["$.catalog.product['attr_id']"],
+          output: "value",
+        },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.payload) as { value: unknown };
+      expect(body.value).toBe("p1");
     });
   });
 

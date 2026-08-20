@@ -233,21 +233,37 @@ au fur et à mesure qu'ils seront ajoutés.
 ### Tests e2e navigateur (`apps/web/e2e`)
 
 Rejoue dans un **vrai navigateur** (Firefox headless, piloté via `selenium-webdriver` +
-`geckodriver`) trois parcours :
+`geckodriver`) plusieurs parcours :
 
 - `workflow.e2e.test.ts` — celui de la vérification manuelle de l'itération 3 : créer un projet →
   créer un workflow → ajouter un node HTTP via la palette → l'éditer dans l'inspecteur →
   enregistrer → exécuter → attendre que l'exécution passe à un statut final et vérifier que la
   page affiche "Succès" et son journal.
-- `htmlPreview.e2e.test.ts` — celui de l'itération 4 (preview HTML + sélection visuelle, §6/§8) :
-  pointer un node HTTP vers un serveur de fixture local, ouvrir l'aperçu, **basculer le contexte
-  WebDriver dans l'iframe sandboxée** pour cliquer un vrai élément, vérifier que les sélecteurs
-  candidats affichés correspondent à l'exemple du cahier des charges, valider la règle, et
-  confirmer qu'un node `extract` relié apparaît dans le canvas.
+- `preview.e2e.test.ts` — celui de l'itération 4 (preview HTML + sélection visuelle, §6/§8),
+  **étendu au JSON** : deux scénarios. Le premier pointe un node HTTP vers un serveur de fixture
+  local, ouvre l'aperçu, **bascule le contexte WebDriver dans l'iframe sandboxée** pour cliquer un
+  vrai élément, vérifie que les sélecteurs candidats affichés correspondent à l'exemple du cahier
+  des charges, valide la règle, et confirme qu'un node `extract` relié apparaît dans le canvas. Le
+  second pointe un node HTTP vers une réponse JSON, ouvre l'aperçu (l'arbre replié/colorisé
+  `JsonTreeView`), déplie un nœud replié par défaut, clique une valeur, vérifie que le candidat
+  calculé est le JSONPath canonique (`$.items[0].price`), valide la règle, et confirme qu'un node
+  `extract` avec `sourceType: "json"` apparaît relié.
 - `nodeContextMenu.e2e.test.ts` — celui de l'itération 5 : chaque bouton de la palette affiche son
   point de couleur, les nodes `dataTransform`/`textCrypto` s'ajoutent et s'éditent, un clic droit
   sur un node ouvre le menu contextuel personnalisé, "Dupliquer" crée un node distinct (vérifié via
   l'attribut `data-id` de React Flow) et "Supprimer" ne retire que le node ciblé.
+- `loopNode.e2e.test.ts` — celui de l'itération 6 (node "Boucle") : création d'un node `loop` via
+  la palette, réglage de `source` sur une variable globale du projet, dépliage/édition de l'étape
+  par défaut du corps intégré (une `setVariable` imbriquée — prouve que la composition récursive
+  d'inspecteurs fonctionne réellement dans un navigateur), sauvegarde puis **rechargement complet
+  de la page** pour vérifier que chaque champ a traversé l'aller-retour API. La preuve d'exécution
+  réelle du node (liaison `item`/`runtime`, modes de sortie) vit côté moteur
+  (`packages/workflow-core/src/{engine,executors/loopExecutor}.test.ts`) plutôt qu'ici — voir
+  ARCHITECTURE.md, itération 6, pour la limite pré-existante de l'éditeur qui explique ce choix.
+- `inspectorPanelResize.e2e.test.ts` — panneau d'inspection redimensionnable : sélectionne un
+  node, fait glisser la poignée sur son bord gauche avec un vrai geste pointeur (`driver.actions()`)
+  de 100px vers la gauche, vérifie que le panneau s'élargit réellement en conséquence, puis
+  recharge la page et confirme que la largeur choisie a survécu (persistée en `localStorage`).
 
 Firefox plutôt que Chromium/Playwright : le Chromium embarqué par Playwright nécessite des
 bibliothèques système installées via `sudo apt-get`, indisponible sur certaines machines de dev de
