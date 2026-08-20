@@ -61,8 +61,10 @@ Modèle de données Prisma : `WorkflowVersion` est immutable (modifier un workfl
 version, §16 « versionné ») ; `Execution.workflowVersionId` fige la version réellement exécutée
 même si le workflow est modifié après coup ; `ExecutionLog` est une table séparée (pas un blob JSON)
 pour permettre une lecture incrémentale/temps réel à l'itération WebSocket. `Schedule` et
-`Credential` (§17.5) ne sont **pas** créés — ils appartiennent aux itérations scheduler/auth, non
-demandées ici.
+`Credential` (§17.5) n'étaient **pas** créés à cette itération — ils appartenaient aux itérations
+scheduler/auth, non demandées à l'époque. `Schedule` est livré depuis (itération 7, voir plus bas :
+`POST`/`GET /workflows/:id/schedules`, `PATCH`/`DELETE /schedules/:id`) ; `Credential` reste hors
+périmètre.
 
 **Piège technique documenté** (voir commentaires dans le code) : NestJS résout l'injection de
 dépendances via `emitDecoratorMetadata` (reflect-metadata), qui exige que les classes injectées
@@ -583,13 +585,93 @@ de 100px vers la gauche via `driver.actions()`, largeur du panneau effectivement
 Selenium qui ciblaient le texte exact (`nodeContextMenu.e2e.test.ts`) ont été mis à jour en
 conséquence.
 
+## Itération 7 — Scheduler exécutable (livrée)
+
+Les types `Schedule`/`ScheduleType` existaient déjà (Specs.md §14) ; cette itération les rend
+réellement exécutables : table Prisma, endpoints CRUD, déclenchement réel via BullMQ, UI.
+
+Architecture logique, en reprenant exactement le schéma de §14 :
+
+```text
+Schedule (Postgres)
+    ↓ upsertJobScheduler (apps/api)
+BullMQ job scheduler ("workflow-schedule-triggers")
+    ↓ tick (à l'heure due)
+apps/worker : processScheduleTrigger → crée un Execution "pending"
+    ↓ enqueueExecution
+BullMQ ("workflow-executions") — la queue existante, inchangée
+    ↓
+apps/worker : processExecutionJob (déjà livré, itération 2) → WorkflowEngine.run
+```
+
+- **`packages/database/prisma/schema.prisma`** : nouveau modèle `Schedule` (`type` — enum Prisma
+  natif `manual|interval|hourly|daily|weekly|cron`, mêmes valeurs que le `ScheduleType` Zod déjà
+  existant —, `everyMinutes`/`cronExpression` optionnels, `enabled`), relié à `Workflow` avec
+  `onDelete: Cascade`. `type: "manual"` et `enabled: false` signifient tous les deux "ne se
+  déclenche jamais tout seul" — la différence est purement l'intention de l'utilisateur (un choix
+  explicite "pas de planification" contre une pause temporaire) ; apps/api n'enregistre un job
+  scheduler BullMQ que pour une ligne à la fois activée et non `manual`.
+- **`packages/queue`** : nouvelle queue `SCHEDULE_TRIGGER_QUEUE_NAME`
+  (`"workflow-schedule-triggers"`), distincte de la queue d'exécution existante — les deux formes
+  de job n'ont rien en commun (un tick de planification n'a pas encore d'`Execution`).
+- **`apps/api/src/schedules/`** : `POST`/`GET /workflows/:workflowId/schedules`,
+  `PATCH`/`DELETE /schedules/:id`. La validation Zod (`dto.ts`) exige `everyMinutes` pour
+  `interval` et une `cronExpression` qui **parse réellement** pour `cron` — vérifiée avec
+  `cron-parser`, épinglé à la même version exacte que celle dont dépend `bullmq` en interne, pour
+  que ce qui est accepté ici soit garanti accepté par BullMQ ensuite. `hourly`/`daily`/`weekly` se
+  traduisent en motifs cron fixes calés sur l'horloge murale (`0 * * * *`, `0 0 * * *`,
+  `0 0 * * 0` — schedule-repeat.ts) plutôt qu'un "toutes les N ms depuis maintenant", qui dériverait
+  à chaque redémarrage du serveur. `SchedulesService` n'écrit jamais d'`Execution` ni n'exécute le
+  moteur — seulement la ligne `Schedule` et le *job scheduler* BullMQ associé (`upsertJobScheduler`/
+  `removeJobScheduler`, une primitive BullMQ 5.x dédiée exactement à ce cas : un déclencheur
+  récurrent identifié par une clé stable, ici l'id du `Schedule`).
+- **Nettoyage cross-cutting** : supprimer un `Workflow` (ou un `Project`, qui cascade à travers
+  tous ses workflows) supprime bien les lignes `Schedule` via `ON DELETE CASCADE` côté Postgres,
+  mais Postgres n'a aucun moyen d'aller nettoyer l'état BullMQ correspondant côté Redis. Corrigé en
+  appelant `SchedulesService.removeAllJobSchedulersFor{Workflow,Project}` avant chaque suppression
+  (`WorkflowsService.remove`/`ProjectsService.remove`) — sans quoi un job scheduler orphelin
+  continuerait de créer des `Execution` pour un workflow qui n'existe plus.
+- **`apps/worker/src/processScheduleTrigger.ts`** : consomme la queue de déclenchement, crée un
+  `Execution` "pending" et l'enfile sur la queue d'exécution existante — exactement le chemin que
+  prend un clic manuel sur "Exécuter" (`ExecutionsService.createForWorkflow`), simplement déclenché
+  par un tick BullMQ plutôt qu'une requête HTTP. Tolère explicitement la course entre un tick déjà
+  en vol et une planification désactivée/supprimée entre-temps (comportement normal, pas une
+  erreur) en passant son tour silencieusement plutôt que de lever.
+- **`apps/web/src/components/SchedulesPanel.tsx`** : bouton "⏱ Planification" dans l'en-tête de
+  l'éditeur — liste les planifications du workflow ouvert, case à cocher "Actif" par ligne,
+  formulaire d'ajout dont les champs changent selon le type choisi. Modifier le type/les paramètres
+  d'une planification existante n'est pas supporté (mirroring `UpdateScheduleSchema`, qui n'accepte
+  que `enabled`) — changer la récurrence signifie supprimer puis recréer.
+
+**Vérifié** : 436 tests Vitest au total dans le monorepo (+16 `apps/api` : 6 pour
+`schedule-repeat.ts`, 10 e2e contre un vrai Postgres/Redis — dont la lecture directe de l'état
+BullMQ via `queue.getJobScheduler()` pour prouver que l'API enregistre réellement le bon motif, pas
+seulement qu'elle répond 201 — et +5 `apps/worker`, dont un test qui fait **réellement tourner** un
+`Worker`/`Queue` BullMQ en direct avec un intervalle de 2 secondes et attend le vrai déclenchement,
+plutôt que d'appeler la fonction directement). Nouveau scénario e2e navigateur committé
+(`apps/web/e2e/schedules.e2e.test.ts`) : ajout d'une planification "toutes les 15 minutes",
+activation/désactivation réelle, rejet d'une expression cron invalide avec message d'erreur visible,
+ajout d'une planification cron valide, suppression, puis **rechargement complet de la page**
+confirmant la persistance côté serveur.
+
+**Un vrai bug de script de test trouvé pendant la vérification** (pas dans l'application) : le
+test "tourne pour de vrai" de `processScheduleTrigger.test.ts` utilisait d'abord la queue de
+production `SCHEDULE_TRIGGER_QUEUE_NAME` — un vrai process `apps/worker` de développement tournant
+en parallèle sur le même Redis (l'environnement de vérification manuelle de ce même tour) lui volait
+alors la moitié des jobs (BullMQ ne livre un job qu'à un seul consommateur parmi tous ceux qui
+écoutent une queue), faisant échouer le test de façon intermittente sans que le code testé soit en
+cause. Corrigé en isolant ce test sur un nom de queue jetable (`processScheduleTrigger` lui-même ne
+sait pas, et n'a pas besoin de savoir, quelle queue a livré le job).
+
 ## Explicitement hors périmètre à ce stade
 
 - **WebSocket temps réel** (§17.12) — le moteur émet déjà des événements (`onEvent`) et le worker
   persiste des `ExecutionLog` au fil de l'exécution ; l'UI actuelle les affiche par polling (1s),
   pas de relais en direct.
-- **Scheduler exécutable** (§14) — les types `Schedule`/`ScheduleType` existent, mais ni table
-  Prisma, ni cron, ni endpoint, ni UI.
+- **Timezone/fenêtres d'exécution/limite de concurrence/priorités pour le scheduler** (§14,
+  explicitement listées comme "évolutions futures") — le scheduler livré en itération 7 couvre le
+  strict MVP (`manual`/`interval`/`hourly`/`daily`/`weekly`/`cron`), toujours en UTC (le défaut de
+  BullMQ).
 - **Browser crawling / Playwright pour l'exécution des workflows** (§5, §17.9) — le moteur
   (`packages/workflow-core`, exécuteur `http`) reste strictement HTTP (Undici). Un rendu headless
   Playwright existe désormais, mais uniquement pour l'outil de preview interactif de l'éditeur (voir
@@ -601,7 +683,7 @@ conséquence.
   « planned for V2 ».
 - **Credentials/Auth**, **Docker complet** (web/api/worker/browser-worker containerisés, §19-21),
   **application Electron** (§17.3, §24) — seul un `docker-compose.yml` minimal (postgres+redis) est
-  fourni.
+  fourni. Prochaines itérations proposées, dans cet ordre (voir plus bas).
 - **Drag-and-drop riche, undo/redo, mise en page persistée** dans l'éditeur visuel — la position
   des nodes est recalculée à chaque chargement (voir itération 3 ci-dessus), pas sauvegardée.
 
@@ -612,9 +694,9 @@ conséquence.
 3. ~~Preview HTML + sélection visuelle~~ — livrée (itération 4).
 4. ~~Nodes de traitement de texte + menu contextuel de l'éditeur~~ — livré (itération 5).
 5. ~~Preview JSON/XML + node Boucle~~ — livré (itération 6).
-6. **Scheduler exécutable**, puis **Docker complet** (containerisation de
-   `web`/`api`/`worker`/`browser-worker`) et **coquille Electron**, dans l'esprit de la section 24
-   (MVP v1).
+6. ~~Scheduler exécutable~~ — livré (itération 7).
+7. **Docker complet** (containerisation de `web`/`api`/`worker`/`browser-worker`), puis **coquille
+   Electron**, dans l'esprit de la section 24 (MVP v1).
 
 ## Comment vérifier
 
@@ -625,7 +707,7 @@ docker compose up -d postgres redis     # ou: pnpm infra:up
 pnpm install                             # génère aussi le client Prisma
 pnpm db:migrate                          # première migration (interactif la 1ère fois : --name init)
 pnpm build
-pnpm test        # 415 tests Vitest (unitaires + intégration moteur + e2e api/worker sur vrai Postgres/Redis)
+pnpm test        # 436 tests Vitest (unitaires + intégration moteur + e2e api/worker sur vrai Postgres/Redis)
 pnpm lint
 pnpm typecheck
 

@@ -5,6 +5,7 @@ import { QueueModule } from "./queue/queue.module";
 import { ProjectsModule } from "./projects/projects.module";
 import { WorkflowsModule } from "./workflows/workflows.module";
 import { ExecutionsModule } from "./executions/executions.module";
+import { SchedulesModule } from "./schedules/schedules.module";
 import { HealthModule } from "./health/health.module";
 import { ToolsModule } from "./tools/tools.module";
 
@@ -13,6 +14,7 @@ import { ToolsModule } from "./tools/tools.module";
     ConfigModule.forRoot({ isGlobal: true }),
     PrismaModule,
     QueueModule,
+    SchedulesModule,
     ProjectsModule,
     WorkflowsModule,
     ExecutionsModule,

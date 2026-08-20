@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from "@nestjs/comm
 import { Prisma, type Workflow, type WorkflowVersion } from "@datarover/database";
 import { WorkflowDefinitionSchema, type WorkflowDefinition } from "@datarover/workflow-types";
 import { PrismaService } from "../prisma/prisma.service";
+import { SchedulesService } from "../schedules/schedules.service";
 import type { CreateWorkflowDto, UpdateWorkflowDto } from "./dto";
 
 export interface WorkflowSummary extends Workflow {
@@ -20,7 +21,10 @@ export interface WorkflowWithCurrentVersion extends Workflow {
 
 @Injectable()
 export class WorkflowsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly schedulesService: SchedulesService,
+  ) {}
 
   async create(projectId: string, dto: CreateWorkflowDto): Promise<WorkflowWithCurrentVersion> {
     const project = await this.prisma.project.findUnique({ where: { id: projectId } });
@@ -131,6 +135,9 @@ export class WorkflowsService {
     if (!existing) {
       throw new NotFoundException(`Workflow ${id} not found`);
     }
+    // Postgres's ON DELETE CASCADE removes this workflow's Schedule rows, but has no way to also
+    // clean up the BullMQ job scheduler each one may have registered — do that first.
+    await this.schedulesService.removeAllJobSchedulersForWorkflow(id);
     await this.prisma.workflow.delete({ where: { id } });
   }
 

@@ -33,6 +33,7 @@ import { nodeTypes } from "../components/nodes/WorkflowNode";
 import { NodePalette } from "../components/NodePalette";
 import { NodeInspectorPanel } from "../components/NodeInspectorPanel";
 import { NodeContextMenu, type NodeContextMenuState } from "../components/NodeContextMenu";
+import { SchedulesPanel } from "../components/SchedulesPanel";
 
 export function WorkflowEditorPage(): JSX.Element {
   const { projectId, workflowId } = useParams<{ projectId: string; workflowId: string }>();
@@ -48,6 +49,7 @@ export function WorkflowEditorPage(): JSX.Element {
   const [workflowName, setWorkflowName] = useState("");
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [contextMenu, setContextMenu] = useState<NodeContextMenuState | null>(null);
+  const [isSchedulesPanelOpen, setIsSchedulesPanelOpen] = useState(false);
 
   // Guards the initial-population effect below so a background refetch of
   // the same workflow (e.g. react-query's window-focus refetch, or the
@@ -296,6 +298,13 @@ export function WorkflowEditorPage(): JSX.Element {
           </Link>
           <button
             type="button"
+            onClick={() => setIsSchedulesPanelOpen(true)}
+            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+          >
+            ⏱ Planification
+          </button>
+          <button
+            type="button"
             onClick={() => void handleSave()}
             disabled={updateWorkflow.isPending}
             className="rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
@@ -364,6 +373,10 @@ export function WorkflowEditorPage(): JSX.Element {
           onCreateExtractNode={handleCreateExtractNode}
         />
       </div>
+
+      {isSchedulesPanelOpen && workflowId && (
+        <SchedulesPanel workflowId={workflowId} onClose={() => setIsSchedulesPanelOpen(false)} />
+      )}
     </div>
   );
 }

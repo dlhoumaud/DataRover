@@ -9,6 +9,16 @@ export interface ExecutionJobData {
 }
 
 /**
+ * Payload of a job enqueued on the {@link SCHEDULE_TRIGGER_QUEUE_NAME} queue — one tick of a
+ * recurring `Schedule`. Carries `workflowId` alongside `scheduleId` so the consumer doesn't need
+ * an extra database round trip just to know which workflow to run.
+ */
+export interface ScheduleTriggerJobData {
+  scheduleId: string;
+  workflowId: string;
+}
+
+/**
  * Connection options for the Redis instance backing the BullMQ queue.
  *
  * Mirrors the subset of `ioredis`/`bullmq` connection options this

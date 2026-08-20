@@ -264,6 +264,11 @@ Rejoue dans un **vrai navigateur** (Firefox headless, piloté via `selenium-webd
   node, fait glisser la poignée sur son bord gauche avec un vrai geste pointeur (`driver.actions()`)
   de 100px vers la gauche, vérifie que le panneau s'élargit réellement en conséquence, puis
   recharge la page et confirme que la largeur choisie a survécu (persistée en `localStorage`).
+- `schedules.e2e.test.ts` — celui de l'itération 7 (scheduler, §14) : ouvre le panneau "⏱
+  Planification", ajoute une planification "toutes les 15 minutes", l'active/désactive réellement,
+  soumet une expression cron invalide (message d'erreur visible, aucune ligne créée) puis une
+  valide, supprime la première planification, et recharge la page pour confirmer que celle qui
+  reste a bien persisté côté serveur.
 
 Firefox plutôt que Chromium/Playwright : le Chromium embarqué par Playwright nécessite des
 bibliothèques système installées via `sudo apt-get`, indisponible sur certaines machines de dev de

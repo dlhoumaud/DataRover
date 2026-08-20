@@ -16,6 +16,15 @@ enum ExecutionStatus {
   retrying
 }
 
+enum ScheduleType {
+  manual
+  interval
+  hourly
+  daily
+  weekly
+  cron
+}
+
 model Project {
   id          String   @id @default(cuid())
   name        String
@@ -37,6 +46,7 @@ model Workflow {
   project    Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
   versions   WorkflowVersion[]
   executions Execution[]
+  schedules  Schedule[]
 
   @@index([projectId])
 }
@@ -83,4 +93,25 @@ model ExecutionLog {
   execution Execution @relation(fields: [executionId], references: [id], onDelete: Cascade)
 
   @@index([executionId])
+}
+
+/// A recurring trigger for a workflow (Specs.md §14). `type: manual` and `enabled: false` both
+/// mean "never fires automatically" — the difference is purely user intent (an explicit "no
+/// schedule" choice vs. a temporarily paused one) — apps/api only ever registers a BullMQ job
+/// scheduler (see @datarover/queue's SCHEDULE_TRIGGER_QUEUE_NAME) for a row that is both enabled
+/// and not `manual`. `everyMinutes` is required (validated in apps/api's DTO, not here — Prisma
+/// has no cross-field constraints) when `type` is `interval`; `cronExpression` when it is `cron`.
+model Schedule {
+  id             String       @id @default(cuid())
+  workflowId     String
+  type           ScheduleType
+  everyMinutes   Int?
+  cronExpression String?
+  enabled        Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  workflow Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@index([workflowId])
 }
