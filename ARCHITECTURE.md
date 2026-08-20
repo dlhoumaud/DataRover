@@ -663,6 +663,106 @@ alors la moitié des jobs (BullMQ ne livre un job qu'à un seul consommateur par
 cause. Corrigé en isolant ce test sur un nom de queue jetable (`processScheduleTrigger` lui-même ne
 sait pas, et n'a pas besoin de savoir, quelle queue a livré le job).
 
+## Itération 8 — Docker complet (livrée)
+
+`docker compose up --build` (la commande cible exacte de Specs.md §19) démarre désormais
+l'environnement complet — `web`, `api`, `worker`, `browser-worker`, `postgres`, `redis` — sur un
+seul réseau Docker, sans étape manuelle (migrations comprises).
+
+### `browser-worker` devient un vrai service séparé
+
+Jusqu'ici, le rendu JavaScript de l'outil de preview (itération 4) tournait **dans le processus
+`apps/api`** (`BrowserRendererService`, Playwright). Specs.md §19-20 exige explicitement que
+`browser-worker` soit un service à part, séparé du worker HTTP, précisément pour qu'un rendu
+lent/bloqué/planté ne puisse jamais affecter autre chose que lui-même — une exigence que
+"tourner dans le même processus que le reste de l'API" ne satisfaisait pas, containerisation ou
+non. Extrait dans une nouvelle app **`apps/browser-worker`** : un micro-service NestJS+Fastify
+avec une seule route (`POST /render`), qui reprend le code de rendu existant tel quel
+(`chromeBinary.ts`, la logique de rendu/dismissal de bandeau cookies — inchangée). `apps/api` ne
+dépend plus de `playwright-core` du tout (supprimé de son `package.json`) : son
+`BrowserWorkerClient` (`apps/api/src/tools/browser-worker.client.ts`) appelle ce service par HTTP
+(`BROWSER_WORKER_URL`, `undici`), et traduit ses erreurs exactement comme le faisait l'ancien code
+in-process.
+
+**Bénéfice inattendu, découvert en migrant les tests** : `apps/api/test/tools.e2e.test.ts` n'a
+plus besoin d'un vrai Chrome pour ses propres tests — seulement d'un faux `browser-worker` (un
+simple serveur HTTP fixture, comme pour n'importe quel autre test e2e de ce fichier), puisque
+driver un vrai navigateur est désormais la responsabilité exclusive de
+`apps/browser-worker/test/render.e2e.test.ts` (qui, lui, garde une vraie vérification contre un
+vrai Chrome — bandeau de consentement compris). Toute la suite `apps/api` est passée de ~10s à
+~0.3s d'exécution, sans perdre la moindre couverture : c'est un signe que le découpage suit bien
+une frontière de responsabilité réelle, pas seulement une frontière de déploiement.
+
+### Un seul `Dockerfile` (et un seul `Dockerfile.dev`) pour les quatre services Node
+
+Specs.md §21 demande explicitement un unique `Dockerfile`/`Dockerfile.dev` (noms au singulier),
+pas un par service. Réalisé via le patron officiellement recommandé par Turborepo pour ce cas —
+`turbo prune <package> --docker`, qui réduit le monorepo à la seule sous-arborescence dont ce
+service a réellement besoin (déterminé depuis le graphe de dépendances réel, jamais à la main) —
+puis une image finale choisie par `--target` : `runner` (Node nu, `api`/`worker`), `runner-browser-
+worker` (`runner` + un vrai Chromium Alpine), `runner-web` (nginx servant le build statique de
+`apps/web`), et `runner-migrate` (`prisma migrate deploy`, un job unique qui s'arrête après avoir
+appliqué les migrations en attente — `api`/`worker` attendent explicitement sa réussite avant de
+démarrer, donc un tout premier `docker compose up --build` sur une base vide n'a besoin d'aucune
+étape manuelle).
+
+**Deux vrais pièges du patron `turbo prune` rencontrés en le faisant fonctionner pour de vrai**
+(aucun des deux n'est mentionné dans la documentation Turborepo elle-même) :
+1. `out/json` (la couche mise en cache dès que les *dépendances* changent, avant même de copier le
+   vrai code source) ne contient que des `package.json` — mais `packages/database` a son propre
+   script `postinstall: prisma generate`, qui a besoin du fichier `schema.prisma` réel, absent à
+   ce stade. Corrigé en installant avec `--ignore-scripts` à cette étape, puis en rejouant tous les
+   scripts d'installation (`pnpm rebuild`) une fois `out/full` (le vrai code source) copié.
+2. `out/full` ne contient que les fichiers appartenant aux packages *inclus* dans l'élagage — pas
+   les fichiers à la racine du monorepo dont ils dépendent quand même (`tsconfig.base.json`, dont
+   hérite le `tsconfig.json` de chaque package). Corrigé en les copiant explicitement dans l'image
+   après `out/full`.
+
+### `apps/web` : servi par nginx (prod), servi par Vite (dev) — jamais par `node dist/main.js`
+
+Seul service statique du lot. `runner-web` construit `apps/web/dist` (Vite) puis le sert via
+nginx (`docker/nginx.conf` — `try_files ... /index.html` pour le fallback SPA du routeur
+client, sans quoi un rechargement sur `/projects/abc` renverrait un 404 nginx plutôt que de laisser
+react-router prendre le relais). Piège classique des SPA en Docker, explicitement contourné :
+`VITE_API_URL` est **inliné dans le JS au moment du build de l'image** (Vite n'a aucune
+configuration "au runtime" pour une SPA statique) — il doit donc pointer vers l'adresse qu'un
+**navigateur sur la machine hôte** peut atteindre (le port publié de `api`, ex.
+`http://localhost:3001`), jamais vers le nom de service interne au réseau Docker
+(`http://api:3001`, injoignable depuis l'extérieur du réseau Docker).
+
+### Mode développement (`docker-compose.dev.yml`)
+
+`docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build` : chaque service Node
+tourne via son `pnpm --filter <pkg> dev` habituel (hot reload nest/tsx/vite) au lieu d'un
+`dist/main.js` compilé, avec le dépôt monté en volume — modifier un fichier sur l'hôte se répercute
+immédiatement dans le conteneur. Un volume anonyme sur `/app/node_modules` (un seul, pas un par
+package) masque spécifiquement la racine `node_modules` du montage bind — suffisant parce que le
+`node_modules` de chaque package de l'espace de travail n'est, chez pnpm, qu'un lien symbolique
+relatif vers ce magasin racine ; il se résout donc correctement vers la copie du conteneur sans
+avoir besoin de son propre volume dédié.
+
+**Vérifié** : les 5 images (`migrate`, `api`, `worker`, `browser-worker`, `web`) se construisent et
+`docker compose up --build` démarre les 6 services avec succès (`api`/`browser-worker` rapportent
+`healthy` sur leur `/health`, `migrate` s'arrête à 0). Preuve d'exécution bout en bout réelle, à
+travers la stack **entièrement containerisée** (pas de raccourci vers un process local) : création
+d'un projet → d'un workflow → déclenchement d'une exécution → le `worker` (son propre conteneur)
+la traite et la fait passer à `success` ; et séparément, un aperçu avec rendu JavaScript
+(`render: true`) traverse réellement `api` → `browser-worker` → un vrai Chromium dans son propre
+conteneur, réseau Docker interne compris (résolution DNS du nom de service `browser-worker` vérifiée
+directement). La suite e2e navigateur existante (`apps/web/e2e/`) a été rejouée sans modification
+contre la stack containerisée : 5 des 7 scénarios passent tels quels ; les 2 restants
+(`preview.e2e.test.ts`) échouent pour une raison attendue et documentée, pas un bug — ils démarrent
+un serveur de fixture local lié à `127.0.0.1` côté hôte, injoignable depuis le conteneur `api`
+(`127.0.0.1`, vu de l'intérieur d'un conteneur, désigne sa propre boucle locale, jamais celle de
+l'hôte) ; ces deux tests restent la référence pour l'usage normal (`pnpm test:e2e` contre la stack
+lancée via `pnpm dev`), pas contre la stack containerisée. 443 tests Vitest au total dans le
+monorepo (+7 `apps/browser-worker`).
+
+**Un vrai bug de process trouvé pendant la vérification** (pas dans le code applicatif) : plusieurs
+`nest start --watch`/`tsx watch` de développement local, accumulés au fil des redémarrages successifs
+de cette session, tournaient encore en tâche de fond et se disputaient les mêmes ports/queues avec
+les conteneurs Docker — nettoyés avant de lancer `docker compose up`.
+
 ## Explicitement hors périmètre à ce stade
 
 - **WebSocket temps réel** (§17.12) — le moteur émet déjà des événements (`onEvent`) et le worker
@@ -673,17 +773,16 @@ sait pas, et n'a pas besoin de savoir, quelle queue a livré le job).
   strict MVP (`manual`/`interval`/`hourly`/`daily`/`weekly`/`cron`), toujours en UTC (le défaut de
   BullMQ).
 - **Browser crawling / Playwright pour l'exécution des workflows** (§5, §17.9) — le moteur
-  (`packages/workflow-core`, exécuteur `http`) reste strictement HTTP (Undici). Un rendu headless
-  Playwright existe désormais, mais uniquement pour l'outil de preview interactif de l'éditeur (voir
-  itération 4, "Rendu JavaScript") — une exécution de workflow réelle ne rend jamais de JS.
+  (`packages/workflow-core`, exécuteur `http`) reste strictement HTTP (Undici). `apps/browser-
+  worker` (itération 8) reste scopé à l'outil de preview interactif de l'éditeur — une exécution de
+  workflow réelle ne rend toujours jamais de JS.
 - **`WHILE`** (§9.5) — explicitement V2 dans le cahier des charges (§25). `FOR EACH` est livré,
   scopé, en itération 6 (node `loop` — corps intégré, pas de boucle imbriquée, voir plus haut).
 - **Sorties** Webhook/Database/CSV (§9.6) — V2 (§25).
 - **XPath** comme stratégie d'extraction — le type existe, l'exécution lève une erreur explicite
   « planned for V2 ».
-- **Credentials/Auth**, **Docker complet** (web/api/worker/browser-worker containerisés, §19-21),
-  **application Electron** (§17.3, §24) — seul un `docker-compose.yml` minimal (postgres+redis) est
-  fourni. Prochaines itérations proposées, dans cet ordre (voir plus bas).
+- **Credentials/Auth**, **application Electron** (§17.3, §24) — seule la coquille Electron reste à
+  faire pour boucler la section 24 (MVP v1) ; Docker complet est livré (itération 8).
 - **Drag-and-drop riche, undo/redo, mise en page persistée** dans l'éditeur visuel — la position
   des nodes est recalculée à chaque chargement (voir itération 3 ci-dessus), pas sauvegardée.
 
@@ -695,8 +794,9 @@ sait pas, et n'a pas besoin de savoir, quelle queue a livré le job).
 4. ~~Nodes de traitement de texte + menu contextuel de l'éditeur~~ — livré (itération 5).
 5. ~~Preview JSON/XML + node Boucle~~ — livré (itération 6).
 6. ~~Scheduler exécutable~~ — livré (itération 7).
-7. **Docker complet** (containerisation de `web`/`api`/`worker`/`browser-worker`), puis **coquille
-   Electron**, dans l'esprit de la section 24 (MVP v1).
+7. ~~Docker complet~~ — livré (itération 8).
+8. **Coquille Electron**, dans l'esprit de la section 24 (MVP v1) — dernière pièce manquante avant
+   ce jalon.
 
 ## Comment vérifier
 
@@ -707,7 +807,7 @@ docker compose up -d postgres redis     # ou: pnpm infra:up
 pnpm install                             # génère aussi le client Prisma
 pnpm db:migrate                          # première migration (interactif la 1ère fois : --name init)
 pnpm build
-pnpm test        # 436 tests Vitest (unitaires + intégration moteur + e2e api/worker sur vrai Postgres/Redis)
+pnpm test        # 443 tests Vitest (unitaires + intégration moteur + e2e api/worker sur vrai Postgres/Redis)
 pnpm lint
 pnpm typecheck
 
@@ -720,4 +820,11 @@ node apps/worker/dist/main.js
 # puis, dans un 3e terminal : créer un projet, un workflow, déclencher une exécution
 # (voir le contrat API ci-dessus — POST /projects, POST /projects/:id/workflows,
 # POST /workflows/:id/executions, GET /executions/:id).
+
+# Environnement Docker complet (itération 8, §19-21) — alternative à tout ce qui précède,
+# aucune installation locale de Node/pnpm nécessaire :
+cp .env.example .env
+docker compose up --build            # web (:5173), api (:3001), worker, browser-worker, postgres, redis
+# Mode développement (hot reload) à la place :
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```

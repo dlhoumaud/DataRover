@@ -1,8 +1,8 @@
 {
-  "name": "@datarover/api",
+  "name": "@datarover/browser-worker",
   "version": "0.1.0",
   "private": true,
-  "description": "DataRover HTTP API — persists projects/workflows/executions via Prisma and enqueues execution jobs via BullMQ. Never runs the workflow engine itself.",
+  "description": "DataRover browser-rendering microservice — drives a real headless Chrome/Chromium via playwright-core, isolated from apps/api and apps/worker so a heavy/stuck render can never affect either (Specs.md §19-20: \"browser-worker\" must be a separate service from the HTTP worker).",
   "scripts": {
     "build": "nest build",
     "start": "dotenv -e ../../.env -- node dist/main.js",
@@ -22,15 +22,7 @@
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "zod": "^3.23.8",
-    "bullmq": "^5.34.0",
-    "cron-parser": "4.9.0",
-    "ioredis": "^5.4.1",
-    "undici": "^6.21.0",
-    "@datarover/database": "workspace:*",
-    "@datarover/expression-engine": "workspace:*",
-    "@datarover/extractor": "workspace:*",
-    "@datarover/queue": "workspace:*",
-    "@datarover/workflow-types": "workspace:*"
+    "playwright-core": "^1.48.0"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.4.9",

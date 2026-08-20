@@ -1,10 +1,10 @@
 import { Module } from "@nestjs/common";
-import { BrowserRendererService } from "./browser-renderer.service";
+import { BrowserWorkerClient } from "./browser-worker.client";
 import { ToolsController } from "./tools.controller";
 import { ToolsService } from "./tools.service";
 
 @Module({
   controllers: [ToolsController],
-  providers: [ToolsService, BrowserRendererService],
+  providers: [ToolsService, BrowserWorkerClient],
 })
 export class ToolsModule {}

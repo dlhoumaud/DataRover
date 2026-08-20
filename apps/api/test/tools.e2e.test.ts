@@ -28,14 +28,79 @@ const FIXTURE_PNG = Buffer.from(
   "base64",
 );
 
+/**
+ * Stands in for the real apps/browser-worker service: `ToolsService`'s `render: true` branch only
+ * needs to correctly call out to `BROWSER_WORKER_URL` and translate its response — actually
+ * driving a real browser (JS execution, consent-banner dismissal) is apps/browser-worker's own
+ * responsibility, already covered end to end by apps/browser-worker/test/render.e2e.test.ts
+ * against a real Chrome. Testing that here too would just be a slower, redundant duplicate of the
+ * same coverage instead of testing this app's own actual job: the HTTP proxying/error-translation
+ * in BrowserWorkerClient.
+ */
+function startFixtureBrowserWorker(): Promise<{ server: Server; url: string }> {
+  return new Promise((resolve, reject) => {
+    const server = createServer((req, res) => {
+      if (req.method !== "POST" || req.url !== "/render") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      let raw = "";
+      req.on("data", (chunk: Buffer) => {
+        raw += chunk.toString();
+      });
+      req.on("end", () => {
+        const body = JSON.parse(raw) as { url: string; headers?: Record<string, string> };
+        if (body.url.endsWith("/spa")) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ status: 200, html: "<h1>Produit rendu</h1>" }));
+          return;
+        }
+        if (body.url.endsWith("/consent")) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ status: 200, html: "<div>Contenu reel du produit</div>" }));
+          return;
+        }
+        if (body.url.endsWith("/echo-headers")) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ status: 200, html: JSON.stringify(body.headers ?? {}) }));
+          return;
+        }
+        if (body.url.endsWith("/render-fails")) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ message: `Failed to navigate to "${body.url}": simulated failure` }));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+    });
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        reject(new Error("Fixture browser-worker did not bind to a TCP port"));
+        return;
+      }
+      resolve({ server, url: `http://127.0.0.1:${String(address.port)}` });
+    });
+  });
+}
+
 describe("Tools", () => {
   let app: NestFastifyApplication;
   let prisma: PrismaService;
   let server: Server;
   let baseUrl: string;
+  let browserWorkerServer: Server;
   const createdProjectIds: string[] = [];
 
   beforeAll(async () => {
+    // Set before compiling AppModule: BrowserWorkerClient reads BROWSER_WORKER_URL at
+    // construction time, when Nest instantiates ToolsModule's providers.
+    const browserWorker = await startFixtureBrowserWorker();
+    browserWorkerServer = browserWorker.server;
+    process.env.BROWSER_WORKER_URL = browserWorker.url;
+
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
     prisma = app.get(PrismaService);
@@ -106,6 +171,9 @@ describe("Tools", () => {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));
     });
+    await new Promise<void>((resolve, reject) => {
+      browserWorkerServer.close((error) => (error ? reject(error) : resolve()));
+    });
     await app.close();
   });
 
@@ -156,8 +224,6 @@ describe("Tools", () => {
       expect(response.statusCode).toBe(400);
     });
 
-    // Needs a real system Chrome/Chromium available (see BrowserRendererService /
-    // chromeBinary.ts) — same assumption as the browser e2e suite needing a real Firefox.
     it("plain-fetches by default, missing content that only exists after client-side JS runs", async () => {
       const projectId = await createProject({ baseUrl });
       const response = await app.getHttpAdapter().getInstance().inject({
@@ -171,7 +237,14 @@ describe("Tools", () => {
       expect(body.html).not.toContain("Produit rendu");
     });
 
-    it("with render: true, executes the page's JS in a real headless browser and captures the result", async () => {
+    // The four tests below exercise BrowserWorkerClient against the fixture browser-worker
+    // (startFixtureBrowserWorker, above) — proving apps/api correctly calls out to
+    // BROWSER_WORKER_URL and translates its response/errors. Actually driving a real browser is
+    // apps/browser-worker's own job, verified there against a real Chrome
+    // (apps/browser-worker/test/render.e2e.test.ts) — duplicating that here would only make this
+    // suite slower without covering anything new.
+
+    it("with render: true, forwards the interpolated URL and headers to the browser-worker and returns its result", async () => {
       const projectId = await createProject({ baseUrl });
       const response = await app.getHttpAdapter().getInstance().inject({
         method: "POST",
@@ -180,10 +253,10 @@ describe("Tools", () => {
       });
       expect(response.statusCode).toBe(200);
       const body = JSON.parse(response.payload) as { html: string };
-      expect(body.html).toContain("Produit rendu");
-    }, 30_000);
+      expect(body.html).toBe("<h1>Produit rendu</h1>");
+    });
 
-    it("with render: true, dismisses a full-screen consent overlay before capturing the DOM", async () => {
+    it("with render: true, returns whatever HTML the browser-worker reports (e.g. post-consent-dismissal content)", async () => {
       const projectId = await createProject({ baseUrl });
       const response = await app.getHttpAdapter().getInstance().inject({
         method: "POST",
@@ -192,9 +265,36 @@ describe("Tools", () => {
       });
       expect(response.statusCode).toBe(200);
       const body = JSON.parse(response.payload) as { html: string };
-      expect(body.html).toContain("Contenu reel du produit");
-      expect(body.html).not.toContain("Ce site utilise des cookies");
-    }, 30_000);
+      expect(body.html).toBe("<div>Contenu reel du produit</div>");
+    });
+
+    it("with render: true, forwards interpolated headers through to the browser-worker's request body", async () => {
+      const projectId = await createProject({ baseUrl });
+      const response = await app.getHttpAdapter().getInstance().inject({
+        method: "POST",
+        url: "/tools/preview-html",
+        payload: {
+          projectId,
+          method: "GET",
+          url: "{{ global.baseUrl }}/echo-headers",
+          headers: { "x-custom-header": "hello" },
+          render: true,
+        },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.payload) as { html: string };
+      expect(JSON.parse(body.html)).toEqual({ "x-custom-header": "hello" });
+    });
+
+    it("with render: true, surfaces a browser-worker-reported render failure as a 400", async () => {
+      const projectId = await createProject({ baseUrl });
+      const response = await app.getHttpAdapter().getInstance().inject({
+        method: "POST",
+        url: "/tools/preview-html",
+        payload: { projectId, method: "GET", url: "{{ global.baseUrl }}/render-fails", render: true },
+      });
+      expect(response.statusCode).toBe(400);
+    });
 
     it("returns 400 when render: true is combined with a non-GET method", async () => {
       const projectId = await createProject({});

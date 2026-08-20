@@ -1,0 +1,88 @@
+# Development overlay (Specs.md §21) — layer this on top of the base compose file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+#
+# `postgres`/`redis`/`migrate` are inherited unchanged from docker-compose.yml. This file only
+# overrides the four app services, replacing their production image (`Dockerfile`, a multi-stage
+# build) with the plain dev one (`Dockerfile.dev`) and running each one's normal
+# `pnpm --filter <pkg> dev` (nest/tsx/vite watch mode) instead of a compiled `dist/main.js` — so
+# editing a file on the host is picked up immediately inside the container, the same experience as
+# running `pnpm dev` directly on the host (which remains the simpler option whenever containers
+# aren't specifically needed).
+#
+# `.:/app` bind-mounts the whole repo; the `/app/node_modules` anonymous volume on every service
+# then shadows *only* the root `node_modules` with that image's own (freshly `pnpm install`-ed at
+# build time, so always something valid) copy instead of the host's — every workspace package's
+# own `node_modules/` is just relative symlinks into that root store (pnpm's usual layout), so
+# they transparently resolve into the container's copy without needing their own anonymous volume
+# each — see Dockerfile.dev's header comment for why that isolation matters at all.
+
+services:
+  api:
+    build: !override
+      context: .
+      dockerfile: Dockerfile.dev
+    command: pnpm --filter @datarover/api dev
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-datarover}:${POSTGRES_PASSWORD:-datarover}@postgres:5432/${POSTGRES_DB:-datarover}?schema=public
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      API_PORT: ${API_PORT:-3001}
+      WEB_ORIGIN: http://localhost:${WEB_PORT:-5173}
+      BROWSER_WORKER_URL: http://browser-worker:${BROWSER_WORKER_PORT:-3002}
+      NODE_ENV: development
+    volumes:
+      - .:/app
+      - /app/node_modules
+    healthcheck:
+      disable: true
+
+  worker:
+    build: !override
+      context: .
+      dockerfile: Dockerfile.dev
+    command: pnpm --filter @datarover/worker dev
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-datarover}:${POSTGRES_PASSWORD:-datarover}@postgres:5432/${POSTGRES_DB:-datarover}?schema=public
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
+      NODE_ENV: development
+    volumes:
+      - .:/app
+      - /app/node_modules
+
+  browser-worker:
+    build: !override
+      context: .
+      dockerfile: Dockerfile.dev
+    command: pnpm --filter @datarover/browser-worker dev
+    environment:
+      BROWSER_WORKER_PORT: ${BROWSER_WORKER_PORT:-3002}
+      NODE_ENV: development
+    volumes:
+      - .:/app
+      - /app/node_modules
+    healthcheck:
+      disable: true
+
+  web:
+    build: !override
+      context: .
+      dockerfile: Dockerfile.dev
+    command: pnpm --filter @datarover/web dev
+    environment:
+      WEB_PORT: ${WEB_PORT:-5173}
+      # Same value as the production compose file's build-time VITE_API_URL, but read here at
+      # *runtime* (as an env var Vite's dev server picks up) instead of baked in — dev mode
+      # doesn't build a static bundle at all.
+      VITE_API_URL: http://localhost:${API_PORT:-3001}
+    # `!override` (Compose spec merge control), not a plain list — the base file's mapping targets
+    # container port 80 (nginx, production only); Compose's default merge *concatenates* port
+    # lists across -f files rather than replacing them, which would otherwise try to publish the
+    # same host port twice for one container and fail to start.
+    ports: !override
+      - "${WEB_PORT:-5173}:${WEB_PORT:-5173}"
+    volumes:
+      - .:/app
+      - /app/node_modules

@@ -18,7 +18,8 @@ export const PreviewHtmlSchema = z.object({
    * When true, the page is rendered in a real headless browser instead of plain-fetched — for
    * targets whose actual content only exists after client-side JS runs (a SPA shell with no
    * meaningful server-rendered markup). Slower (real navigation + wait for network idle) and only
-   * supported for GET, matching normal page-navigation semantics — see BrowserRendererService.
+   * supported for GET, matching normal page-navigation semantics — see BrowserWorkerClient /
+   * apps/browser-worker's RenderService.
    * Only meaningful for `responseType: "html"` — the frontend never sets it otherwise.
    */
   render: z.boolean().optional(),

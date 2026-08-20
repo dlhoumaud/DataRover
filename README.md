@@ -12,20 +12,20 @@ réel d'avancement (ce qui est implémenté vs le reste de la vision) est docume
 
 ## État actuel
 
-Cinq itérations livrées : le **moteur de workflow** (packages TypeScript purs), un **backend
+Huit itérations livrées : le **moteur de workflow** (packages TypeScript purs), un **backend
 exécutable** (API NestJS + PostgreSQL + worker BullMQ), une **UI React** (éditeur visuel React
-Flow, **plein écran**) branchée dessus, l'outil de **preview HTML + sélection visuelle
-d'éléments** (cliquer un élément dans un aperçu sandboxé de la page cible, avec rendu JavaScript
-optionnel pour les pages React/Vue, pour générer un node d'extraction), et des **nodes de
-traitement de données** (`dataTransform`, affiché "Traitement" — entrée brute/JSON/YAML/XML,
-sortie texte/liste/tableau/entier/décimal/booléen déduite automatiquement de la dernière opération
-— lower/upper/replace/regex/slice/trim/pad en mode brut, getPath (JSONPath)/keys/values/stringify
-en mode structuré ; `textCrypto` : hash — md5 à sha3-512, ripemd160, blake2 —, encodage —
-base64/hex/URL/charsets —, chiffrement symétrique — AES/3DES/chacha20-poly1305 — et RSA
-asymétrique) avec palette colorée et menu contextuel (dupliquer/supprimer) dans l'éditeur. Pas
-encore de scheduler exécutable, de
-Docker complet ni d'Electron (voir
-[`ARCHITECTURE.md`](./ARCHITECTURE.md) pour le détail et la feuille de route).
+Flow, **plein écran**, panneau d'inspection redimensionnable) branchée dessus, l'outil de
+**preview HTML/JSON/XML + sélection visuelle d'éléments** (cliquer un élément dans un aperçu
+sandboxé — ou un nœud dans un arbre JSON/XML colorisé et repliable — avec rendu JavaScript
+optionnel pour les pages React/Vue, pour générer un node d'extraction), des **nodes de traitement
+de données** (`dataTransform`, affiché "Traitement" — entrée brute/JSON/YAML/XML, sortie
+texte/liste/tableau/entier/décimal/booléen déduite automatiquement de la dernière opération ;
+`textCrypto` : hash/encodage/chiffrement symétrique et RSA) et de **boucle** (`loop`, corps
+intégré, itère sur une liste/un tableau), un **scheduler exécutable** (déclenchement récurrent
+manuel/intervalle/horaire/quotidien/hebdomadaire/cron, via BullMQ) et un **environnement Docker
+complet** (`docker compose up --build` démarre `web`/`api`/`worker`/`browser-worker` — le rendu
+JavaScript isolé dans son propre service — `postgres`/`redis`, migrations comprises). Reste
+**Electron** (voir [`ARCHITECTURE.md`](./ARCHITECTURE.md) pour le détail et la feuille de route).
 
 ```text
 packages/
@@ -38,8 +38,9 @@ packages/
 └── queue                contrat partagé API↔worker pour la file BullMQ
 
 apps/
-├── api                  API NestJS (Fastify) : projets, workflows, exécutions, health
+├── api                  API NestJS (Fastify) : projets, workflows, exécutions, health, scheduler
 ├── worker               consomme la queue, exécute le moteur, persiste le résultat
+├── browser-worker       rendu JavaScript (Playwright) pour l'outil de preview — appelé par l'API
 └── web                  UI React (Vite + React Flow) : éditeur visuel, exécution, suivi
 
 examples/
@@ -50,14 +51,16 @@ examples/
 
 - Node.js ≥ 20 (voir `.nvmrc`)
 - pnpm ≥ 9 (via Corepack)
-- Docker (pour PostgreSQL + Redis en local — `docker-compose.yml`)
+- Docker (pour PostgreSQL + Redis en local en mode développement — `docker-compose.yml` — ou pour
+  l'environnement Docker complet, voir [Docker](#docker) plus bas)
 - Un vrai Firefox installé (pour `pnpm test:e2e`, voir "Tests e2e navigateur" plus bas)
-- Optionnel — Google Chrome ou Chromium installé, pour l'option "Rendu JavaScript" de l'outil de
-  preview HTML (`apps/api/src/tools/browser-renderer.service.ts`) : nécessaire uniquement pour
-  prévisualiser des pages dont le contenu réel n'existe qu'après exécution du JS côté client (une
-  SPA React/Vue/etc.) ; sans Chrome installé, tout le reste de l'app fonctionne normalement, seule
-  cette case à cocher renvoie une erreur explicite si on l'active. Chemin détecté automatiquement
-  (`/usr/bin/google-chrome`, etc.) ou fourni via `CHROME_EXECUTABLE_PATH`.
+- Optionnel en développement local (fourni automatiquement dans l'image Docker de
+  `apps/browser-worker`) — Google Chrome ou Chromium installé, pour l'option "Rendu JavaScript" de
+  l'outil de preview HTML (`apps/browser-worker/src/render/render.service.ts`) : nécessaire
+  uniquement pour prévisualiser des pages dont le contenu réel n'existe qu'après exécution du JS
+  côté client (une SPA React/Vue/etc.) ; sans Chrome installé, tout le reste de l'app fonctionne
+  normalement, seule cette case à cocher renvoie une erreur explicite si on l'active. Chemin
+  détecté automatiquement (`/usr/bin/google-chrome`, etc.) ou fourni via `CHROME_EXECUTABLE_PATH`.
 
 ```bash
 corepack enable
@@ -111,20 +114,22 @@ Prérequis : Postgres/Redis démarrés (`pnpm infra:up`) et `.env` renseigné.
 pnpm dev
 ```
 
-Lance **en parallèle**, avec rechargement à chaud, les trois apps (via le pipeline `dev` de
+Lance **en parallèle**, avec rechargement à chaud, les quatre apps (via le pipeline `dev` de
 Turborepo, persistant) :
 
 | App | Commande sous-jacente | Adresse |
 |---|---|---|
 | `apps/api` | `nest start --watch` | http://localhost:3001 (`$API_PORT`) |
 | `apps/worker` | `tsx watch src/main.ts` | — (aucun port, consomme la queue) |
+| `apps/browser-worker` | `nest start --watch` | http://localhost:3002 (`$BROWSER_WORKER_PORT`) — appelé uniquement par `apps/api`, jamais par le navigateur |
 | `apps/web` | `vite` | http://localhost:5173 (`$WEB_PORT`) |
 
-Pour lancer une seule app en développement (utile pour ne pas noyer les logs des deux autres) :
+Pour lancer une seule app en développement (utile pour ne pas noyer les logs des autres) :
 
 ```bash
 pnpm --filter @datarover/api dev
 pnpm --filter @datarover/worker dev
+pnpm --filter @datarover/browser-worker dev
 pnpm --filter @datarover/web dev
 ```
 
@@ -142,45 +147,64 @@ pnpm --filter @datarover/example-product-monitor start
 pnpm build   # build tous les packages/apps (tsup pour les packages, nest build / vite build pour les apps)
 ```
 
-Puis, en trois process séparés (l'API n'exécute **jamais** le moteur elle-même — voir
+Puis, en quatre process séparés (l'API n'exécute **jamais** le moteur elle-même — voir
 l'itération 2 dans [`ARCHITECTURE.md`](./ARCHITECTURE.md)) :
 
 ```bash
-node apps/api/dist/main.js       # API — écoute sur $API_PORT (3001 par défaut)
-node apps/worker/dist/main.js    # Worker — consomme la queue BullMQ et exécute les workflows
+node apps/api/dist/main.js             # API — écoute sur $API_PORT (3001 par défaut)
+node apps/worker/dist/main.js          # Worker — consomme la queue BullMQ et exécute les workflows
+node apps/browser-worker/dist/main.js  # Rendu JavaScript pour l'outil de preview (appelé par l'API)
 pnpm --filter @datarover/web preview   # sert le build statique de l'UI (vérification locale)
 ```
 
 `vite preview` sert `apps/web/dist` localement pour vérifier un build de production — ce n'est pas
-un serveur web de production (pas de compression/cache/TLS). Le déploiement réel de ce dossier
-statique derrière un vrai serveur/CDN fait partie de l'itération "Docker complet" à venir (voir
-feuille de route dans `ARCHITECTURE.md`).
+un serveur web de production (pas de compression/cache/TLS) ; **l'environnement Docker complet**
+(voir [Docker](#docker) ci-dessous) sert ce même dossier via un vrai nginx et couvre les quatre
+process ci-dessus en une seule commande — c'est la voie recommandée pour un déploiement réel.
 
 Variables d'environnement à définir en production : voir [`.env.example`](./.env.example)
 (`DATABASE_URL`, `REDIS_HOST`/`REDIS_PORT`, `API_PORT`, `WEB_ORIGIN`, `WORKER_CONCURRENCY`,
-`VITE_API_URL` — cette dernière doit pointer vers l'URL publique de l'API et être fournie **au
-moment du build** de `apps/web`, Vite l'inline dans le bundle statique).
+`BROWSER_WORKER_PORT`/`BROWSER_WORKER_URL`, `VITE_API_URL` — cette dernière doit pointer vers
+l'URL publique de l'API et être fournie **au moment du build** de `apps/web`, Vite l'inline dans le
+bundle statique).
 
 ---
 
 ## Docker
 
-Le dépôt fournit un `docker-compose.yml` **minimal** : uniquement les dépendances avec état
-(PostgreSQL, Redis), pas encore la containerisation complète de `web`/`api`/`worker` décrite au
-§19-21 du cahier des charges (c'est un point de la feuille de route, voir `ARCHITECTURE.md`).
+Environnement complet (Specs.md §19-21) : `web`, `api`, `worker`, `browser-worker` (rendu
+JavaScript de l'outil de preview, isolé dans son propre service — voir `ARCHITECTURE.md`,
+itération 8), `postgres`, `redis` — tout sur un seul réseau Docker, migrations comprises (le
+service `migrate` s'exécute une fois puis s'arrête, `api`/`worker` attendent sa réussite avant de
+démarrer).
 
 ```bash
-docker compose up -d          # démarre postgres + redis (équivalent à pnpm infra:up)
-docker compose ps             # vérifier que les deux services sont "healthy"
-docker compose logs -f postgres redis   # suivre les logs
+cp .env.example .env
+docker compose up --build     # web (http://localhost:5173), api (http://localhost:3001), ...
+docker compose ps             # api/browser-worker doivent apparaître "healthy"
+docker compose logs -f api worker browser-worker
 docker compose down           # arrête les conteneurs (conserve les volumes/données)
 docker compose down -v        # arrête ET supprime les volumes (repart d'une base vide)
+docker compose up -d --scale worker=3   # plusieurs workers (Specs.md §20 — scalable horizontalement)
 ```
 
-Les identifiants/ports sont configurables via `.env` (`POSTGRES_*`, `REDIS_*`) — voir
-[`.env.example`](./.env.example). Une fois les conteneurs up, suis la section
-[Mode développement](#mode-développement) ou [Mode production](#mode-production) ci-dessus pour
-lancer l'API/le worker/l'UI (en local, hors Docker, pour cette itération).
+Mode développement (hot reload nest/tsx/vite, dépôt monté en volume — modifier un fichier sur
+l'hôte se répercute immédiatement dans le conteneur) :
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+```
+
+Tout est construit à partir d'un **unique** `Dockerfile`/`Dockerfile.dev` partagé (Specs.md §21) —
+`turbo prune` réduit le monorepo à ce dont chaque service a réellement besoin ; `--target` choisit
+l'image finale (`runner` pour `api`/`worker`, `runner-browser-worker` — `runner` + un vrai
+Chromium —, `runner-web` — nginx servant le build statique —, `runner-migrate`). Détails/pièges
+rencontrés : voir `ARCHITECTURE.md`, itération 8.
+
+Si un process local (`pnpm dev`) tourne déjà sur les mêmes ports (3001/3002/5173/5432/6379),
+arrête-le d'abord — Docker et le mode local ne sont pas censés cohabiter sur les mêmes ports.
+Les identifiants/ports sont configurables via `.env` (voir [`.env.example`](./.env.example)) ;
+tout fonctionne aussi sans aucun `.env` (valeurs par défaut intégrées dans `docker-compose.yml`).
 
 ---
 
@@ -207,8 +231,9 @@ Turborepo build automatiquement les dépendances d'un package avant de tester (`
 | `packages/extractor` | Extraction CSS/JSONPath/XML/Regex, score de robustesse des sélecteurs |
 | `packages/workflow-core` | Moteur : retry/timeout, parcours de graphe, **test d'intégration** avec un vrai serveur HTTP local |
 | `packages/queue` | Lecture des options de connexion Redis depuis l'environnement |
-| `apps/api` | **Tests e2e** (requêtes réelles via l'injection Fastify) contre un **vrai** Postgres/Redis — nécessite `pnpm infra:up` au préalable |
-| `apps/worker` | **Test d'intégration** : exécute un vrai job contre Postgres/Redis + un serveur HTTP local de fixture |
+| `apps/api` | **Tests e2e** (requêtes réelles via l'injection Fastify) contre un **vrai** Postgres/Redis — nécessite `pnpm infra:up` au préalable ; le rendu JavaScript (`render: true`) est testé contre un faux `browser-worker` (fixture HTTP), pas un vrai Chrome — voir `apps/browser-worker` ci-dessous |
+| `apps/worker` | **Test d'intégration** : exécute un vrai job contre Postgres/Redis + un serveur HTTP local de fixture, y compris un vrai déclenchement de planification en temps réel (BullMQ job scheduler) |
+| `apps/browser-worker` | **Tests e2e** contre un **vrai** Chrome/Chromium (SPA rendue, bandeau de consentement dismiss, en-têtes transmis, cible injoignable → 400) — nécessite un Chrome/Chromium installé localement (voir [Prérequis](#prérequis)) |
 | `apps/web` | Voir [Tests de l'UI](#tests-de-lui-appsweb) ci-dessous |
 
 Les suites d'`apps/api` et `apps/worker` ont besoin d'une vraie base/queue disponibles

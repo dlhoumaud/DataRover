@@ -1,12 +1,19 @@
-# Minimal infrastructure for local development of the backend (apps/api, apps/worker).
+# Full "Docker complet" environment (Specs.md §19-21): every service the product needs, wired
+# together on one Docker network. Production-shaped by default — `docker compose up --build` is
+# the literal target command from §19. For hot-reload local development instead, layer
+# docker-compose.dev.yml on top (see its own header comment):
 #
-# This is NOT the full "Docker complet" environment described in Specs.md §19-21 (which also
-# containerizes web/api/worker/browser-worker) — that is a later iteration. For now this only
-# provides the two stateful dependencies (Postgres, Redis) that apps/api and apps/worker need to
-# run locally via `pnpm dev`/`pnpm start`. This file is the natural starting point for that later
-# `docker-compose.yml` and will be extended, not replaced.
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 #
-# Usage: docker compose up -d postgres redis   (or: pnpm infra:up)
+# Every service is built from the one shared root `Dockerfile` (see its own header comment for
+# why there's only one), selecting the app via `build.args.APP_NAME` and the runtime flavor via
+# `build.target`. `migrate` is a one-shot job (not a long-running service): it runs
+# `prisma migrate deploy` against `postgres` and exits 0, and `api`/`worker` both wait for that
+# success before starting — a fresh `docker compose up --build` on an empty database needs no
+# manual migration step.
+#
+# Reads variables from a root `.env` file (see `.env.example`) the same way local `pnpm dev` does;
+# every `${VAR:-default}` below still works with no `.env` at all, for a true "clone and run".
 
 services:
   postgres:
@@ -38,6 +45,120 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # One-shot: applies pending Prisma migrations, then exits. Never restarts (a migration only
+  # ever needs to run once per deploy) — `api`/`worker` depending on its *successful completion*
+  # (not just "started") is what makes a first-ever `docker compose up --build` work unattended.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner-migrate
+      args:
+        APP_NAME: database
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-datarover}:${POSTGRES_PASSWORD:-datarover}@postgres:5432/${POSTGRES_DB:-datarover}?schema=public
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+      args:
+        APP_NAME: api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-datarover}:${POSTGRES_PASSWORD:-datarover}@postgres:5432/${POSTGRES_DB:-datarover}?schema=public
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      API_PORT: ${API_PORT:-3001}
+      # The web container talks to the API from *inside* the compose network by service name
+      # (proxied — see docker/nginx.conf... actually not proxied: the browser itself calls the API
+      # directly at the published host port, see web's VITE_API_URL build arg below) — CORS still
+      # needs to allow that host-facing origin, not the internal one.
+      WEB_ORIGIN: http://localhost:${WEB_PORT:-5173}
+      BROWSER_WORKER_URL: http://browser-worker:${BROWSER_WORKER_PORT:-3002}
+      NODE_ENV: production
+    ports:
+      - "${API_PORT:-3001}:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+      args:
+        APP_NAME: worker
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-datarover}:${POSTGRES_PASSWORD:-datarover}@postgres:5432/${POSTGRES_DB:-datarover}?schema=public
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # Scalable horizontally (Specs.md §20): `docker compose up --scale worker=3` — every replica
+    # independently consumes the same two BullMQ queues, no per-replica config needed.
+
+  browser-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner-browser-worker
+      args:
+        APP_NAME: browser-worker
+    restart: unless-stopped
+    environment:
+      BROWSER_WORKER_PORT: ${BROWSER_WORKER_PORT:-3002}
+      NODE_ENV: production
+    expose:
+      - "${BROWSER_WORKER_PORT:-3002}"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3002/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner-web
+      args:
+        APP_NAME: web
+        # Baked into the built JS at image-build time (Vite has no runtime config for a static
+        # SPA) — must be the address a BROWSER on the host reaches, i.e. the *published* API
+        # port below, never the internal `http://api:3001` service name.
+        VITE_API_URL: http://localhost:${API_PORT:-3001}
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-5173}:80"
+    depends_on:
+      - api
 
 volumes:
   datarover_postgres_data:
