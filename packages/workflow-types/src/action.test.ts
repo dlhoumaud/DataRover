@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   ActionNodeSchema,
+  BrowserActionNodeSchema,
+  BrowserActionStepSchema,
+  DelaySpecSchema,
   ConditionNodeSchema,
   ExtractNodeSchema,
   HttpNodeSchema,
@@ -461,6 +464,115 @@ describe("LoopNodeSchema", () => {
           : { id: "s1", name: "Nested loop", type: "loop", source: "{{ item }}", body: [] };
     const input = { id: "n8", name: "Bad body", type: "loop", source: "{{ global.items }}", body: [bodyStep] };
     expect(LoopNodeSchema.safeParse(input).success).toBe(false);
+  });
+});
+
+describe("DelaySpecSchema", () => {
+  it("parses a fixed delay", () => {
+    expect(DelaySpecSchema.safeParse({ kind: "fixed", ms: 100 }).success).toBe(true);
+  });
+
+  it("parses a random delay range", () => {
+    expect(DelaySpecSchema.safeParse({ kind: "random", minMs: 50, maxMs: 150 }).success).toBe(true);
+  });
+
+  it("accepts a random delay with minMs === maxMs (a degenerate but valid range)", () => {
+    expect(DelaySpecSchema.safeParse({ kind: "random", minMs: 100, maxMs: 100 }).success).toBe(true);
+  });
+
+  it("rejects a random delay with maxMs < minMs", () => {
+    expect(DelaySpecSchema.safeParse({ kind: "random", minMs: 200, maxMs: 100 }).success).toBe(false);
+  });
+
+  it("rejects an unknown kind", () => {
+    expect(DelaySpecSchema.safeParse({ kind: "exponential", ms: 100 }).success).toBe(false);
+  });
+});
+
+describe("BrowserActionStepSchema", () => {
+  it.each([
+    { type: "navigate", url: "https://example.com" },
+    { type: "click", selector: "#submit" },
+    { type: "type", selector: "#q", text: "hello" },
+    { type: "type", selector: "#q", text: "hello", delay: { kind: "fixed", ms: 50 } },
+    { type: "type", selector: "#q", text: "hello", delay: { kind: "random", minMs: 30, maxMs: 120 } },
+    { type: "press", key: "Enter" },
+    { type: "select", selector: "#country", value: "FR" },
+    { type: "hover", selector: ".menu" },
+    { type: "dragTo", sourceSelector: "#item", targetSelector: "#bin" },
+    { type: "scrollIntoView", selector: "#footer" },
+    { type: "scrollPage", y: 400 },
+    { type: "moveMouse", x: 120, y: 340 },
+    { type: "moveMouse", x: 120, y: 340, delay: { kind: "fixed", ms: 80 } },
+    { type: "moveMouse", x: 120, y: 340, delay: { kind: "random", minMs: 20, maxMs: 90 } },
+    { type: "moveMouseRandom" },
+    { type: "moveMouseRandom", delay: { kind: "random", minMs: 20, maxMs: 90 } },
+    { type: "wait", ms: 500 },
+    { type: "waitForSelector", selector: "#result" },
+  ])("parses a valid %j step", (step) => {
+    expect(BrowserActionStepSchema.safeParse(step).success).toBe(true);
+  });
+
+  it("defaults scrollPage.x to 0 when omitted", () => {
+    const result = BrowserActionStepSchema.parse({ type: "scrollPage", y: 100 });
+    expect(result).toMatchObject({ x: 0, y: 100 });
+  });
+
+  it("rejects an unknown step type", () => {
+    expect(BrowserActionStepSchema.safeParse({ type: "screenshot" }).success).toBe(false);
+  });
+
+  it("rejects a click step missing its selector", () => {
+    expect(BrowserActionStepSchema.safeParse({ type: "click" }).success).toBe(false);
+  });
+
+  it("rejects a moveMouse step missing its coordinates", () => {
+    expect(BrowserActionStepSchema.safeParse({ type: "moveMouse" }).success).toBe(false);
+  });
+
+  it("rejects a type step with an invalid random delay range", () => {
+    const input = {
+      type: "type",
+      selector: "#q",
+      text: "hello",
+      delay: { kind: "random", minMs: 100, maxMs: 10 },
+    };
+    expect(BrowserActionStepSchema.safeParse(input).success).toBe(false);
+  });
+});
+
+describe("BrowserActionNodeSchema", () => {
+  const valid = {
+    id: "n9",
+    name: "Login and search",
+    type: "browserAction" as const,
+    startUrl: "https://example.com/login",
+    steps: [
+      { type: "type", selector: "#user", text: "alice" },
+      { type: "click", selector: "#submit" },
+    ],
+  };
+
+  it("parses a valid browserAction node", () => {
+    const result = BrowserActionNodeSchema.parse(valid);
+    expect(result.steps).toHaveLength(2);
+  });
+
+  it("rejects an empty steps array", () => {
+    expect(BrowserActionNodeSchema.safeParse({ ...valid, steps: [] }).success).toBe(false);
+  });
+
+  it("rejects a node with a retryPolicy — replaying the whole sequence on retry is unsafe", () => {
+    const withRetry = {
+      ...valid,
+      retryPolicy: { maxAttempts: 3, backoffMs: 0, backoffMultiplier: 1 },
+    };
+    expect(BrowserActionNodeSchema.safeParse(withRetry).success).toBe(false);
+  });
+
+  it("still accepts timeoutMs (not omitted, unlike retryPolicy)", () => {
+    const result = BrowserActionNodeSchema.parse({ ...valid, timeoutMs: 30_000 });
+    expect(result.timeoutMs).toBe(30_000);
   });
 });
 

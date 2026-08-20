@@ -20,11 +20,15 @@ import type {
 } from "@datarover/workflow-types";
 import { useWorkflow, useUpdateWorkflow, useDeleteWorkflow } from "../api/workflows";
 import { useCreateExecution } from "../api/executions";
+import { useProject } from "../api/projects";
+import { getAvailableVariables } from "../lib/templateVariables";
 import {
   definitionToFlow,
+  findUnreachableNodeIds,
   flowToDefinition,
   generateNodeId,
   createDefaultNode,
+  reassignStartNodeId,
   type FlowNode,
   type FlowEdge,
 } from "../lib/workflowGraph";
@@ -40,6 +44,7 @@ export function WorkflowEditorPage(): JSX.Element {
   const navigate = useNavigate();
 
   const { data: workflow, isLoading, isError, error } = useWorkflow(workflowId);
+  const { data: project } = useProject(projectId);
   const updateWorkflow = useUpdateWorkflow(workflowId ?? "");
   const deleteWorkflow = useDeleteWorkflow(projectId ?? "");
   const createExecution = useCreateExecution();
@@ -60,9 +65,11 @@ export function WorkflowEditorPage(): JSX.Element {
 
   const selectedNodeId = useEditorStore((state) => state.selectedNodeId);
   const isDirty = useEditorStore((state) => state.isDirty);
+  const startNodeId = useEditorStore((state) => state.startNodeId);
   const selectNode = useEditorStore((state) => state.selectNode);
   const markDirty = useEditorStore((state) => state.markDirty);
   const markClean = useEditorStore((state) => state.markClean);
+  const setStartNodeId = useEditorStore((state) => state.setStartNodeId);
 
   useEffect(() => {
     loadedWorkflowIdRef.current = null;
@@ -80,9 +87,10 @@ export function WorkflowEditorPage(): JSX.Element {
     setNodes(flowNodes);
     setEdges(flowEdges);
     setWorkflowName(workflow.name);
+    setStartNodeId(workflow.currentVersion.definition.startNodeId);
     loadedWorkflowIdRef.current = workflow.id;
     setHasLoadedOnce(true);
-  }, [workflow, setNodes, setEdges]);
+  }, [workflow, setNodes, setEdges, setStartNodeId]);
 
   function handleAddNode(type: ActionNode["type"]): void {
     const existingIds = new Set(nodes.map((flowNode) => flowNode.id));
@@ -127,11 +135,23 @@ export function WorkflowEditorPage(): JSX.Element {
   }
 
   function handleDeleteNode(nodeId: string): void {
+    const remainingNodeIds = nodes.filter((flowNode) => flowNode.id !== nodeId).map((flowNode) => flowNode.id);
     setNodes((current) => current.filter((flowNode) => flowNode.id !== nodeId));
     setEdges((current) => current.filter((edge) => edge.source !== nodeId && edge.target !== nodeId));
     if (selectedNodeId === nodeId) {
       selectNode(null);
     }
+    if (startNodeId !== null) {
+      // Deleting the current start node itself needs a replacement — see reassignStartNodeId's
+      // own doc comment for why *something* always has to take over.
+      setStartNodeId(reassignStartNodeId(remainingNodeIds, nodeId, startNodeId));
+    }
+    markDirty();
+  }
+
+  /** Invoked from the node context menu — see NodeContextMenu's "Définir comme nœud de départ". */
+  function handleSetStartNode(nodeId: string): void {
+    setStartNodeId(nodeId);
     markDirty();
   }
 
@@ -153,6 +173,20 @@ export function WorkflowEditorPage(): JSX.Element {
   const availableNodeIds = useMemo(
     () => nodes.filter((flowNode) => flowNode.id !== selectedNodeId).map((flowNode) => flowNode.id),
     [nodes, selectedNodeId],
+  );
+
+  // Every `{{ }}`-usable reference offered by TemplateInput's autocomplete — see
+  // getAvailableVariables's own doc comment for what's included and why (every node's output,
+  // every declared project variable; loop-body-only bindings are added separately, inside
+  // LoopNodeInspector itself, since they only exist there).
+  const templateVariables = useMemo(
+    () =>
+      getAvailableVariables({
+        nodes: nodes.map((flowNode) => flowNode.data.node),
+        currentNodeId: selectedNodeId ?? undefined,
+        globalVariableKeys: Object.keys(project?.variables ?? {}),
+      }),
+    [nodes, selectedNodeId, project],
   );
 
   /**
@@ -202,13 +236,16 @@ export function WorkflowEditorPage(): JSX.Element {
   }
 
   function buildDefinitionInput(): Omit<WorkflowDefinition, "id"> | null {
-    if (!workflow) {
+    // `startNodeId` is only ever `null` right after deleting a workflow's very last node (see
+    // reassignStartNodeId) — an unsaveable, momentary state (WorkflowDefinitionSchema requires
+    // at least one node anyway), not something to paper over with a fallback guess here.
+    if (!workflow || startNodeId === null) {
       return null;
     }
     const built = flowToDefinition({
       id: workflow.currentVersion.definition.id,
       name: workflowName,
-      startNodeId: workflow.currentVersion.definition.startNodeId,
+      startNodeId,
       nodes,
       edges,
     });
@@ -247,8 +284,21 @@ export function WorkflowEditorPage(): JSX.Element {
   }
 
   async function handleRun(): Promise<void> {
-    if (!workflowId) {
+    if (!workflowId || startNodeId === null) {
       return;
+    }
+    const unreachable = findUnreachableNodeIds(nodes, edges, startNodeId);
+    if (unreachable.length > 0) {
+      const names = unreachable
+        .map((id) => nodes.find((flowNode) => flowNode.id === id)?.data.node.name ?? id)
+        .join(", ");
+      const confirmed = window.confirm(
+        `Ce(s) nœud(s) ne seront jamais exécutés depuis le nœud de départ actuel : ${names}. ` +
+          `Exécuter quand même ?`,
+      );
+      if (!confirmed) {
+        return;
+      }
     }
     if (isDirty) {
       await handleSave();
@@ -357,8 +407,10 @@ export function WorkflowEditorPage(): JSX.Element {
           {contextMenu && (
             <NodeContextMenu
               state={contextMenu}
+              isStart={contextMenu.nodeId === startNodeId}
               onDuplicate={handleDuplicateNode}
               onDelete={handleDeleteNode}
+              onSetStart={handleSetStartNode}
               onClose={() => setContextMenu(null)}
             />
           )}
@@ -367,6 +419,7 @@ export function WorkflowEditorPage(): JSX.Element {
         <NodeInspectorPanel
           node={selectedFlowNode ? selectedFlowNode.data.node : null}
           availableNodeIds={availableNodeIds}
+          variables={templateVariables}
           projectId={projectId ?? ""}
           onChange={handleInspectorChange}
           onClose={() => selectNode(null)}

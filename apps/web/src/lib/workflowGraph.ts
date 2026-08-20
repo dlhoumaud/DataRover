@@ -47,6 +47,63 @@ export function generateNodeId(type: ActionNode["type"], existingIds: ReadonlySe
 }
 
 /**
+ * What the current start node should become after `deletedNodeId` is removed from the graph.
+ * Deleting a node that ISN'T the start leaves it unchanged; deleting the start node itself picks
+ * `remainingNodeIds[0]` (or `null` if that was the workflow's last node) — a dangling
+ * `startNodeId` pointing at a node that no longer exists would fail `validateDefinition` on the
+ * next save/run (`packages/workflow-core`'s "startNodeId does not reference an existing node"),
+ * so *something* has to take over, deterministically, without asking the user every time.
+ */
+export function reassignStartNodeId(
+  remainingNodeIds: readonly string[],
+  deletedNodeId: string,
+  currentStartNodeId: string,
+): string | null {
+  if (deletedNodeId !== currentStartNodeId) {
+    return currentStartNodeId;
+  }
+  return remainingNodeIds[0] ?? null;
+}
+
+/**
+ * Ids of every node that can never run because no path from `startNodeId` reaches it — the same
+ * BFS `autoLayout` already does to place "orphan" nodes visually, extracted here so
+ * `WorkflowEditorPage` can warn *before* saving/running rather than only ever showing the problem
+ * as an oddly-placed node on the canvas. An edge whose `branch` targets a `condition` node's
+ * untaken side still counts as reachable — this asks "could this node possibly run", not "will it
+ * run on this particular execution".
+ */
+export function findUnreachableNodeIds(nodes: readonly FlowNode[], edges: readonly FlowEdge[], startNodeId: string): string[] {
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const outgoing = new Map<string, string[]>();
+  for (const edge of edges) {
+    const targets = outgoing.get(edge.source) ?? [];
+    targets.push(edge.target);
+    outgoing.set(edge.source, targets);
+  }
+
+  const visited = new Set<string>();
+  if (nodeIds.has(startNodeId)) {
+    const queue = [startNodeId];
+    visited.add(startNodeId);
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (current === undefined) {
+        break;
+      }
+      for (const neighborId of outgoing.get(current) ?? []) {
+        if (!visited.has(neighborId) && nodeIds.has(neighborId)) {
+          visited.add(neighborId);
+          queue.push(neighborId);
+        }
+      }
+    }
+  }
+
+  return nodes.filter((node) => !visited.has(node.id)).map((node) => node.id);
+}
+
+/**
  * Computes a deterministic position for every node in `definition`, purely
  * for visual display — `WorkflowDefinition` never carries layout data, so
  * this is recomputed on every load rather than persisted.
@@ -218,6 +275,25 @@ export function createDefaultNode(type: ActionNode["type"], id: string): ActionN
         source: "",
         body: [{ id: `${id}Step1`, name: "Étape 1", type: "setVariable", variables: {} }],
         outputMode: "list",
+      };
+    case "browserAction":
+      // `timeoutMs` gets an explicit default here (unlike every other node type, which leaves it
+      // unset) — a multi-step interactive sequence has a much less predictable time budget than a
+      // single HTTP call, so an unset timeout would be more likely to surprise someone later.
+      //
+      // The default step is `wait`, not `click` — every *other* step type needs a free-text field
+      // (selector/url/key/…) filled in before it's schema-valid, and BrowserActionNodeInspector's
+      // save effect (like TextCryptoNodeInspector's) only commits once every step parses
+      // successfully. Starting from a step that's already valid with no typing means a brand-new
+      // node's `name`/`startUrl` can be edited and saved immediately, rather than silently doing
+      // nothing until the user notices and fills in the first step's selector.
+      return {
+        id,
+        name: "New Navigateur",
+        type: "browserAction",
+        startUrl: "",
+        steps: [{ type: "wait", ms: 500 }],
+        timeoutMs: 30_000,
       };
     default: {
       const exhaustiveCheck: never = type;

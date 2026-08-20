@@ -112,6 +112,9 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
+      # Needed by browserActionExecutor.ts (packages/workflow-core) — a real, executed workflow
+      # can now drive browser-worker directly, not just apps/api's editor preview tool.
+      BROWSER_WORKER_URL: http://browser-worker:${BROWSER_WORKER_PORT:-3002}
       NODE_ENV: production
     depends_on:
       postgres:
@@ -121,7 +124,11 @@ services:
       migrate:
         condition: service_completed_successfully
     # Scalable horizontally (Specs.md §20): `docker compose up --scale worker=3` — every replica
-    # independently consumes the same two BullMQ queues, no per-replica config needed.
+    # independently consumes the same two BullMQ queues, no per-replica config needed. Every
+    # replica also independently calls browser-worker for `browserAction` nodes — see
+    # session.service.ts's doc comment on why that route launches its own dedicated browser
+    # process per call rather than sharing one, which is what makes this safe to scale without a
+    # browser-worker-side concurrency story yet (see ARCHITECTURE.md's known limitations).
 
   browser-worker:
     build:

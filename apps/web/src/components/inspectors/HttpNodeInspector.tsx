@@ -9,6 +9,8 @@ import {
   type HttpNode,
 } from "@datarover/workflow-types";
 import { PreviewSelector } from "../PreviewSelector";
+import { TemplateInput } from "../TemplateInput";
+import type { TemplateVariable } from "../../lib/templateVariables";
 
 /**
  * Form schema derived from `HttpNodeSchema`: the scalar fields (name,
@@ -59,9 +61,14 @@ export function HttpNodeInspector({
   onChange,
   projectId,
   onCreateExtractNode,
+  variables = [],
 }: {
   node: HttpNode;
   onChange: (updated: HttpNode) => void;
+  /** `{{ }}` autocomplete entries for url/headers/queryParams/body — see TemplateInput. Optional
+   *  (default `[]`) so LoopNodeInspector's embedded-body usage doesn't need updating at the same
+   *  time. */
+  variables?: TemplateVariable[];
   /**
    * Needed to interpolate the preview URL against the project's global variables (Specs.md §6).
    * Optional along with `onCreateExtractNode`: when this inspector is reused for a step inside a
@@ -207,10 +214,12 @@ export function HttpNodeInspector({
 
       <div>
         <label className="block text-sm font-medium text-gray-700">URL</label>
-        <input
-          {...register("url")}
+        <TemplateInput
+          registration={register("url")}
+          variables={variables}
           placeholder="{{ global.baseUrl }}/products"
-          className="mt-1 w-full rounded-md border border-gray-300 px-2 py-1.5 font-mono text-sm"
+          wrapperClassName="mt-1"
+          className="w-full rounded-md border border-gray-300 px-2 py-1.5 font-mono text-sm"
         />
         {errors.url && <p className="mt-1 text-xs text-red-600">{errors.url.message}</p>}
       </div>
@@ -266,10 +275,12 @@ export function HttpNodeInspector({
                 placeholder="Clé"
                 className="w-1/3 rounded-md border border-gray-300 px-2 py-1 text-sm"
               />
-              <input
-                {...register(`headers.${index}.value` as Path<HttpFormValues>)}
+              <TemplateInput
+                registration={register(`headers.${index}.value` as Path<HttpFormValues>)}
+                variables={variables}
                 placeholder="Valeur"
-                className="flex-1 rounded-md border border-gray-300 px-2 py-1 text-sm"
+                wrapperClassName="flex-1"
+                className="w-full rounded-md border border-gray-300 px-2 py-1 text-sm"
               />
               <button
                 type="button"
@@ -303,10 +314,12 @@ export function HttpNodeInspector({
                 placeholder="Clé"
                 className="w-1/3 rounded-md border border-gray-300 px-2 py-1 text-sm"
               />
-              <input
-                {...register(`queryParams.${index}.value` as Path<HttpFormValues>)}
+              <TemplateInput
+                registration={register(`queryParams.${index}.value` as Path<HttpFormValues>)}
+                variables={variables}
                 placeholder="Valeur"
-                className="flex-1 rounded-md border border-gray-300 px-2 py-1 text-sm"
+                wrapperClassName="flex-1"
+                className="w-full rounded-md border border-gray-300 px-2 py-1 text-sm"
               />
               <button
                 type="button"
@@ -326,10 +339,13 @@ export function HttpNodeInspector({
       {showBody && (
         <div>
           <label className="block text-sm font-medium text-gray-700">Corps (JSON)</label>
-          <textarea
-            {...register("bodyRaw")}
+          <TemplateInput
+            registration={register("bodyRaw")}
+            variables={variables}
+            multiline
             rows={6}
-            className="mt-1 w-full rounded-md border border-gray-300 px-2 py-1.5 font-mono text-sm"
+            wrapperClassName="mt-1"
+            className="w-full rounded-md border border-gray-300 px-2 py-1.5 font-mono text-sm"
           />
           {bodyError && <p className="mt-1 text-xs text-red-600">{bodyError}</p>}
         </div>

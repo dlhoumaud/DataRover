@@ -12,7 +12,7 @@ réel d'avancement (ce qui est implémenté vs le reste de la vision) est docume
 
 ## État actuel
 
-Huit itérations livrées : le **moteur de workflow** (packages TypeScript purs), un **backend
+Neuf itérations livrées : le **moteur de workflow** (packages TypeScript purs), un **backend
 exécutable** (API NestJS + PostgreSQL + worker BullMQ), une **UI React** (éditeur visuel React
 Flow, **plein écran**, panneau d'inspection redimensionnable) branchée dessus, l'outil de
 **preview HTML/JSON/XML + sélection visuelle d'éléments** (cliquer un élément dans un aperçu
@@ -22,10 +22,21 @@ de données** (`dataTransform`, affiché "Traitement" — entrée brute/JSON/YAM
 texte/liste/tableau/entier/décimal/booléen déduite automatiquement de la dernière opération ;
 `textCrypto` : hash/encodage/chiffrement symétrique et RSA) et de **boucle** (`loop`, corps
 intégré, itère sur une liste/un tableau), un **scheduler exécutable** (déclenchement récurrent
-manuel/intervalle/horaire/quotidien/hebdomadaire/cron, via BullMQ) et un **environnement Docker
+manuel/intervalle/horaire/quotidien/hebdomadaire/cron, via BullMQ), un **environnement Docker
 complet** (`docker compose up --build` démarre `web`/`api`/`worker`/`browser-worker` — le rendu
-JavaScript isolé dans son propre service — `postgres`/`redis`, migrations comprises). Reste
-**Electron** (voir [`ARCHITECTURE.md`](./ARCHITECTURE.md) pour le détail et la feuille de route).
+JavaScript isolé dans son propre service — `postgres`/`redis`, migrations comprises), et un node
+**"Navigateur"** (`browserAction`) qui simule une vraie interaction utilisateur (clic, frappe
+clavier caractère par caractère, survol, glisser-déposer, déplacement de souris vers une position
+précise ou aléatoire) via un vrai navigateur Playwright piloté par `browser-worker` — avec, pour la
+frappe et les déplacements de souris, un délai optionnel **fixe ou aléatoire** (min–max, tiré à
+nouveau à chaque exécution) pour simuler un temps de réaction humain plutôt qu'une cadence
+parfaitement régulière. Pour l'instant en configuration manuelle de la séquence d'actions dans
+l'inspecteur ; la preview live avec enregistrement des actions arrive dans une itération suivante.
+Le panneau d'inspection affiche désormais, pour tout node, ses **variables de sortie**
+(`{{ actions.http1.output.status }}`, etc., un clic pour copier), et chaque champ `{{ }}` de
+l'éditeur propose une **autocomplétion** de ces variables (et des variables globales du projet) dès
+qu'on tape `{{`. Reste **Electron** (voir [`ARCHITECTURE.md`](./ARCHITECTURE.md) pour le détail et
+la feuille de route).
 
 ```text
 packages/
@@ -40,7 +51,8 @@ packages/
 apps/
 ├── api                  API NestJS (Fastify) : projets, workflows, exécutions, health, scheduler
 ├── worker               consomme la queue, exécute le moteur, persiste le résultat
-├── browser-worker       rendu JavaScript (Playwright) pour l'outil de preview — appelé par l'API
+├── browser-worker       rendu JavaScript (Playwright) — preview (appelé par l'API) et node
+│                        "Navigateur" (appelé directement par le worker)
 └── web                  UI React (Vite + React Flow) : éditeur visuel, exécution, suivi
 
 examples/
@@ -195,6 +207,42 @@ l'hôte se répercute immédiatement dans le conteneur) :
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```
 
+**Les deux `-f` sont obligatoires à chaque fois** — `docker compose up` seul (ou avec un seul
+`-f docker-compose.yml`) démarre les images de **production** : pas de montage du dépôt en volume,
+donc aucun changement de fichier ne sera jamais visible, peu importe combien de fois on relance ou
+reconstruit. C'est la cause la plus fréquente de "je ne vois pas mes changements" : vérifier
+`docker compose ps` — en mode dev, la commande de chaque conteneur `api`/`worker`/`browser-
+worker`/`web` doit apparaître comme `pnpm --filter ... dev` (nest/tsx/vite en mode watch), jamais
+`node dist/main.js`.
+
+Une fois les conteneurs de dev démarrés, éditer un fichier `.ts`/`.tsx` source suffit — nest/tsx/vite
+en mode watch le détectent immédiatement à l'intérieur du conteneur, **sans jamais relancer
+`docker compose up`**. `--build` (ou `--force-recreate`) n'est nécessaire que pour reconstruire
+l'image elle-même, dans deux cas précis :
+- la première fois (l'image n'existe pas encore) ;
+- après avoir modifié un `package.json` ou `pnpm-lock.yaml` (nouvelle dépendance, ajout d'un
+  package workspace, etc.) — `Dockerfile.dev` exécute `pnpm install` une seule fois, **au moment de
+  la construction de l'image**, puis `docker-compose.dev.yml` masque le `node_modules` du montage
+  par un volume anonyme qui garde ce `node_modules` figé entre deux redémarrages (voir le
+  commentaire d'en-tête de `Dockerfile.dev`) : le dépôt source est bien monté en direct, mais pas
+  `node_modules` — un `pnpm install` fait seulement sur l'hôte, ou un fichier ajouté dans un
+  workspace pas encore connu du `node_modules` de l'image, ne sera invisible depuis le conteneur
+  qu'après un nouveau `--build`.
+
+**Un troisième cas, différent des deux ci-dessus, nécessite non pas un `--build` mais un simple
+`docker compose restart <service>`** : modifier un package **partagé** (`packages/workflow-types`,
+`packages/workflow-core`, …) pendant qu'un service qui en dépend tourne déjà. `nest start --watch`
+(`api`, `browser-worker`) et `tsx watch` (`worker`) ne surveillent que leur propre `src/` — jamais
+le `dist/` d'un package workspace dont ils dépendent. Le fichier source ET son `dist/` recompilé
+sont bien à jour sur disque (montage en direct), mais le **process Node déjà démarré** garde en
+mémoire la version du schéma chargée à son propre démarrage — `require()`/`import` ne relit jamais
+un module déjà chargé. Symptôme typique : après avoir ajouté un champ ou une variante à un schéma
+Zod partagé, certaines valeurs (les nouvelles) se voient rejetées à l'enregistrement pendant que
+les anciennes fonctionnent toujours — pas une erreur de validation en apparence liée au champ
+modifié, juste "certaines actions/valeurs ne s'enregistrent pas". Un `docker compose restart api
+worker browser-worker` (ou le service concerné) force chacun à relire son `dist/` à jamais au
+prochain démarrage, sans reconstruire d'image.
+
 Tout est construit à partir d'un **unique** `Dockerfile`/`Dockerfile.dev` partagé (Specs.md §21) —
 `turbo prune` réduit le monorepo à ce dont chaque service a réellement besoin ; `--target` choisit
 l'image finale (`runner` pour `api`/`worker`, `runner-browser-worker` — `runner` + un vrai
@@ -202,7 +250,10 @@ Chromium —, `runner-web` — nginx servant le build statique —, `runner-migr
 rencontrés : voir `ARCHITECTURE.md`, itération 8.
 
 Si un process local (`pnpm dev`) tourne déjà sur les mêmes ports (3001/3002/5173/5432/6379),
-arrête-le d'abord — Docker et le mode local ne sont pas censés cohabiter sur les mêmes ports.
+arrête-le d'abord — Docker et le mode local ne sont pas censés cohabiter sur les mêmes ports. Si
+des conteneurs de **production** tournent déjà (démarrés sans `docker-compose.dev.yml`), relancer
+directement avec les deux `-f` reconfigure les services en place (pas besoin de `down` d'abord),
+mais `docker compose down` puis la commande dev reste l'option la plus sûre en cas de doute.
 Les identifiants/ports sont configurables via `.env` (voir [`.env.example`](./.env.example)) ;
 tout fonctionne aussi sans aucun `.env` (valeurs par défaut intégrées dans `docker-compose.yml`).
 

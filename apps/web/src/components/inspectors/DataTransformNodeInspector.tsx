@@ -9,6 +9,8 @@ import {
   type DataTransformNode,
   type DataTransformOperation,
 } from "@datarover/workflow-types";
+import { TemplateInput } from "../TemplateInput";
+import type { TemplateVariable } from "../../lib/templateVariables";
 
 /** Same "all fields optional, reshaped on save" approach used throughout this app's node
  *  inspectors (see e.g. TextCryptoNodeInspector) — only the fields relevant to a row's current
@@ -367,9 +369,14 @@ function OperationRow({
 export function DataTransformNodeInspector({
   node,
   onChange,
+  variables = [],
 }: {
   node: DataTransformNode;
   onChange: (updated: DataTransformNode) => void;
+  /** `{{ }}` autocomplete entries for the "Donnée source" field — see TemplateInput. Optional
+   *  (default `[]`, autocomplete simply offers nothing) so this inspector's existing callers
+   *  inside LoopNodeInspector's embedded body don't all need updating at once. */
+  variables?: TemplateVariable[];
 }): JSX.Element {
   const nodeRef = useRef(node);
   nodeRef.current = node;
@@ -451,8 +458,9 @@ export function DataTransformNodeInspector({
 
       <div>
         <label className="block text-sm font-medium text-gray-700">Donnée source</label>
-        <input
-          {...register("input")}
+        <TemplateInput
+          registration={register("input")}
+          variables={variables}
           placeholder="{{ actions.extract1.output.title }}"
           className="mt-1 w-full rounded-md border border-gray-300 px-2 py-1.5 font-mono text-sm"
         />

@@ -15,6 +15,8 @@ import { ExtractNodeInspector } from "./ExtractNodeInspector";
 import { DataTransformNodeInspector } from "./DataTransformNodeInspector";
 import { TextCryptoNodeInspector } from "./TextCryptoNodeInspector";
 import { SetVariableNodeInspector } from "./SetVariableNodeInspector";
+import { TemplateInput } from "../TemplateInput";
+import { getNodeOutputVariables, type TemplateVariable } from "../../lib/templateVariables";
 
 /**
  * Form schema for the loop's own scalar fields — `body` is deliberately excluded here (and
@@ -66,9 +68,16 @@ const BODY_STEP_TYPES: ReadonlyArray<LoopBodyNode["type"]> = [
 export function LoopNodeInspector({
   node,
   onChange,
+  variables = [],
 }: {
   node: LoopNode;
   onChange: (updated: LoopNode) => void;
+  /** `{{ }}` autocomplete entries available to this node's OWN `source` field — evaluated once,
+   *  before the loop starts, so it never sees `item`/`runtime.*` (see `bodyVariables` below for
+   *  what the embedded body steps get instead). Optional (default `[]`) for symmetry with every
+   *  other inspector here, though `loop` is never itself nested inside another loop's body (see
+   *  `LoopBodyNodeSchema`'s doc comment), so there is no real caller that omits it today. */
+  variables?: TemplateVariable[];
 }): JSX.Element {
   const nodeRef = useRef(node);
   nodeRef.current = node;
@@ -139,11 +148,27 @@ export function LoopNodeInspector({
     setExpandedIndex(null);
   }
 
+  // What a body step's own templated fields can reference: everything the loop node itself can
+  // (outer graph nodes, global variables), plus every OTHER body step's output, plus the
+  // per-iteration bindings (`item`, `runtime.*`) that only exist inside this embedded body — see
+  // `LoopNodeSchema`'s doc comment in @datarover/workflow-types. Deliberately includes every body
+  // step regardless of position (not just preceding ones), unlike `ExtractNodeInspector`'s
+  // `availableNodeIds` below — see `getAvailableVariables`'s own doc comment for why autocomplete
+  // doesn't enforce that ordering the way the *source* dropdown does.
+  const bodyVariables: TemplateVariable[] = [
+    ...variables,
+    ...node.body.flatMap((step) => getNodeOutputVariables(step)),
+    { path: "item", label: "item" },
+    { path: "runtime.index", label: "runtime.index" },
+    { path: "runtime.isFirst", label: "runtime.isFirst" },
+    { path: "runtime.isLast", label: "runtime.isLast" },
+  ];
+
   function renderStepInspector(step: LoopBodyNode, index: number): JSX.Element {
     const onStepChange = (updated: ActionNode): void => handleStepChange(index, updated as LoopBodyNode);
     switch (step.type) {
       case "http":
-        return <HttpNodeInspector key={step.id} node={step} onChange={onStepChange} />;
+        return <HttpNodeInspector key={step.id} node={step} onChange={onStepChange} variables={bodyVariables} />;
       case "extract":
         return (
           <ExtractNodeInspector
@@ -154,11 +179,17 @@ export function LoopNodeInspector({
           />
         );
       case "dataTransform":
-        return <DataTransformNodeInspector key={step.id} node={step} onChange={onStepChange} />;
+        return (
+          <DataTransformNodeInspector key={step.id} node={step} onChange={onStepChange} variables={bodyVariables} />
+        );
       case "textCrypto":
-        return <TextCryptoNodeInspector key={step.id} node={step} onChange={onStepChange} />;
+        return (
+          <TextCryptoNodeInspector key={step.id} node={step} onChange={onStepChange} variables={bodyVariables} />
+        );
       case "setVariable":
-        return <SetVariableNodeInspector key={step.id} node={step} onChange={onStepChange} />;
+        return (
+          <SetVariableNodeInspector key={step.id} node={step} onChange={onStepChange} variables={bodyVariables} />
+        );
       default: {
         const exhaustiveCheck: never = step;
         throw new Error(`Type d'étape de boucle non supporté: ${String((exhaustiveCheck as LoopBodyNode).type)}`);
@@ -179,10 +210,12 @@ export function LoopNodeInspector({
 
       <div>
         <label className="block text-sm font-medium text-gray-700">Source (liste/tableau)</label>
-        <input
-          {...register("source")}
+        <TemplateInput
+          registration={register("source")}
+          variables={variables}
           placeholder="{{ actions.extraction.output.items }}"
-          className="mt-1 w-full rounded-md border border-gray-300 px-2 py-1.5 font-mono text-sm"
+          wrapperClassName="mt-1"
+          className="w-full rounded-md border border-gray-300 px-2 py-1.5 font-mono text-sm"
         />
         <p className="mt-1 text-xs text-gray-400">
           Doit s&apos;évaluer en tableau — chaque élément est disponible dans les étapes ci-dessous

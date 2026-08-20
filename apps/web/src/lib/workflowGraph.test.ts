@@ -5,9 +5,12 @@ import {
   autoLayout,
   createDefaultNode,
   definitionToFlow,
+  findUnreachableNodeIds,
   flowToDefinition,
   generateNodeId,
+  reassignStartNodeId,
 } from "./workflowGraph";
+import type { FlowEdge, FlowNode } from "./workflowGraph";
 
 /**
  * A realistic 5-node workflow covering every ActionNode type, wired with a
@@ -205,7 +208,16 @@ describe("autoLayout", () => {
 });
 
 describe("createDefaultNode", () => {
-  it.each(["http", "extract", "condition", "setVariable", "stop", "dataTransform", "textCrypto"] as const)(
+  it.each([
+    "http",
+    "extract",
+    "condition",
+    "setVariable",
+    "stop",
+    "dataTransform",
+    "textCrypto",
+    "browserAction",
+  ] as const)(
     "produces a schema-valid node for type %s",
     (type) => {
       const node = createDefaultNode(type, `${type}Test`);
@@ -214,4 +226,53 @@ describe("createDefaultNode", () => {
       expect(() => ActionNodeSchema.parse(node)).not.toThrow();
     },
   );
+});
+
+describe("reassignStartNodeId", () => {
+  it("leaves the start node unchanged when a different node is deleted", () => {
+    expect(reassignStartNodeId(["a", "b"], "b", "a")).toBe("a");
+  });
+
+  it("picks the first remaining node when the start node itself is deleted", () => {
+    expect(reassignStartNodeId(["b", "c"], "a", "a")).toBe("b");
+  });
+
+  it("returns null when the deleted start node was the workflow's last node", () => {
+    expect(reassignStartNodeId([], "a", "a")).toBeNull();
+  });
+});
+
+describe("findUnreachableNodeIds", () => {
+  // Minimal fixtures — only the fields this function actually reads (id / source / target).
+  function flowNode(id: string): FlowNode {
+    return { id, type: "http", position: { x: 0, y: 0 }, data: { node: createDefaultNode("http", id) } };
+  }
+  function flowEdge(source: string, target: string): FlowEdge {
+    return { id: `${source}-${target}`, source, target };
+  }
+
+  it("returns an empty array when every node is reachable from the start node", () => {
+    const nodes = [flowNode("a"), flowNode("b"), flowNode("c")];
+    const edges = [flowEdge("a", "b"), flowEdge("b", "c")];
+    expect(findUnreachableNodeIds(nodes, edges, "a")).toEqual([]);
+  });
+
+  it("flags a node wired downstream of a node that is not the start (the reported bug)", () => {
+    // browserAction1 -> stop1, but startNodeId is still "stop1" — browserAction1 never runs.
+    const nodes = [flowNode("browserAction1"), flowNode("stop1")];
+    const edges = [flowEdge("browserAction1", "stop1")];
+    expect(findUnreachableNodeIds(nodes, edges, "stop1")).toEqual(["browserAction1"]);
+  });
+
+  it("flags a node with no edges at all", () => {
+    const nodes = [flowNode("a"), flowNode("orphan")];
+    const edges: FlowEdge[] = [];
+    expect(findUnreachableNodeIds(nodes, edges, "a")).toEqual(["orphan"]);
+  });
+
+  it("flags every node when startNodeId itself doesn't reference an existing node", () => {
+    const nodes = [flowNode("a"), flowNode("b")];
+    const edges = [flowEdge("a", "b")];
+    expect(findUnreachableNodeIds(nodes, edges, "missing")).toEqual(["a", "b"]);
+  });
 });

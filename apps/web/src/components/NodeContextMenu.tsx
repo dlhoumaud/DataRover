@@ -18,13 +18,24 @@ const VIEWPORT_MARGIN = 4;
 
 export function NodeContextMenu({
   state,
+  isStart,
   onDuplicate,
   onDelete,
+  onSetStart,
   onClose,
 }: {
   state: NodeContextMenuState;
+  /** Whether this node is already the workflow's start node — see `onSetStart`. */
+  isStart: boolean;
   onDuplicate: (nodeId: string) => void;
   onDelete: (nodeId: string) => void;
+  /**
+   * Designates this node as the workflow's start (`WorkflowDefinition.startNodeId`) — the only
+   * way to do so in the editor. Not shown as a clickable action when `isStart` is already true;
+   * there's nothing useful "unset start" would mean on its own (every workflow needs exactly one
+   * start node), so the only way to change it is to set a *different* node as the new one.
+   */
+  onSetStart: (nodeId: string) => void;
   onClose: () => void;
 }): JSX.Element {
   const menuRef = useRef<HTMLDivElement>(null);
@@ -68,6 +79,23 @@ export function NodeContextMenu({
       className="z-50 w-40 overflow-hidden rounded-md border border-gray-200 bg-white py-1 shadow-lg"
       role="menu"
     >
+      {isStart ? (
+        <div role="menuitem" aria-disabled="true" className="block w-full px-3 py-1.5 text-left text-sm text-gray-400">
+          ✓ Nœud de départ
+        </div>
+      ) : (
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => {
+            onSetStart(state.nodeId);
+            onClose();
+          }}
+          className="block w-full px-3 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-100"
+        >
+          Définir comme nœud de départ
+        </button>
+      )}
       <button
         type="button"
         role="menuitem"

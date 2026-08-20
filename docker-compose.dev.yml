@@ -47,6 +47,7 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
+      BROWSER_WORKER_URL: http://browser-worker:${BROWSER_WORKER_PORT:-3002}
       NODE_ENV: development
     volumes:
       - .:/app

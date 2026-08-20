@@ -98,8 +98,16 @@ describe("workflow walkthrough", () => {
     await driver.sleep(1000);
 
     // 6. Run — the single-node "Stop" branch this workflow starts on needs no network call, so
-    // the execution is expected to reach "success" without any external fixture server.
+    // the execution is expected to reach "success" without any external fixture server. The just-
+    // added HTTP node was never wired as the start node itself (a brand-new workflow always
+    // starts as a lone "stop" node — see ProjectDetailPage's handleCreateWorkflow, and
+    // WorkflowNode's "▶ Départ" badge for the only node that actually runs here), so
+    // WorkflowEditorPage now warns about that via a confirm() dialog before running anyway —
+    // accepted here since this test's whole point is verifying the Stop-only run, not the
+    // (deliberately unreached) HTTP node.
     await driver.findElement(By.xpath("//button[contains(.,'Exécuter')]")).click();
+    await driver.wait(until.alertIsPresent(), TIMEOUT);
+    await driver.switchTo().alert().accept();
     await driver.wait(until.urlMatches(/\/executions\/[^/]+$/), TIMEOUT);
 
     // 7. Poll the execution detail page (the app itself polls the API every second) until it
