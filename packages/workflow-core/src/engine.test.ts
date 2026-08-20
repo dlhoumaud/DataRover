@@ -204,4 +204,48 @@ describe("WorkflowEngine integration", () => {
     expect(execution.actionResults).toHaveLength(1);
     expect(execution.actionResults[0]?.status).toBe("failed");
   });
+
+  it("runs a loop node's embedded body once per item through the real executor dispatch", async () => {
+    // Exercises the real `runNode` wiring end to end (loopExecutor.test.ts covers the loop's own
+    // machinery in isolation, against a hand-built test double for runNode).
+    const definition: WorkflowDefinition = {
+      id: "wf-loop",
+      name: "Loop over items",
+      startNodeId: "iterate",
+      nodes: [
+        {
+          id: "iterate",
+          name: "Boucle",
+          type: "loop",
+          source: "{{ global.items }}",
+          body: [
+            {
+              id: "capture",
+              name: "Capture",
+              type: "setVariable",
+              variables: { seen: "{{ item }}", position: "{{ runtime.index }}" },
+            },
+          ],
+          outputMode: "list",
+        },
+      ],
+      edges: [],
+    };
+
+    const engine = new WorkflowEngine();
+    const execution = await engine.run(definition, {
+      variables: { global: { items: ["a", "b", "c"] } },
+    });
+
+    expect(execution.status).toBe("success");
+    expect(execution.actionResults).toHaveLength(1);
+    const loopResult = execution.actionResults.find((result) => result.nodeId === "iterate");
+    expect(loopResult?.output).toEqual([
+      { seen: "a", position: 0 },
+      { seen: "b", position: 1 },
+      { seen: "c", position: 2 },
+    ]);
+    // The body step's own id never appears in the top-level actionResults — it's loop-local.
+    expect(execution.actionResults.some((result) => result.nodeId === "capture")).toBe(false);
+  });
 });

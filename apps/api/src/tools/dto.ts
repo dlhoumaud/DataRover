@@ -1,8 +1,8 @@
 import { z } from "zod";
-import { ExtractOutputType, HttpMethod } from "@datarover/workflow-types";
+import { ExtractOutputType, ExtractSourceType, HttpMethod } from "@datarover/workflow-types";
 
 /**
- * Fetches a URL on behalf of the editor's HTML preview/selection tool (Specs.md §6). Mirrors the
+ * Fetches a URL on behalf of the editor's preview/selection tool (Specs.md §6). Mirrors the
  * relevant subset of an `http` node's fields — interpolation happens server-side against the
  * target project's global variables, exactly like a real execution would, so the preview is
  * faithful to what running the node would actually fetch.
@@ -19,19 +19,25 @@ export const PreviewHtmlSchema = z.object({
    * targets whose actual content only exists after client-side JS runs (a SPA shell with no
    * meaningful server-rendered markup). Slower (real navigation + wait for network idle) and only
    * supported for GET, matching normal page-navigation semantics — see BrowserRendererService.
+   * Only meaningful for `responseType: "html"` — the frontend never sets it otherwise.
    */
   render: z.boolean().optional(),
 });
 export type PreviewHtmlDto = z.infer<typeof PreviewHtmlSchema>;
 
 /**
- * Tests a fallback chain of CSS selectors against an already-fetched HTML document (the one
- * `preview-html` just returned) — delegates straight to `@datarover/extractor`'s `extractWithCss`
- * so the score/result shown while picking an element in the UI is exactly what a real `extract`
- * node would compute, not a separate approximation.
+ * Tests a fallback chain of selectors against an already-fetched source document (whatever
+ * `preview-html` just returned) — delegates straight to `@datarover/extractor`'s real
+ * `extractWithCss`/`extractWithJsonPath`/`extractWithXml` (picked via `sourceType`, mirroring the
+ * `extract()` dispatcher's own strategy selection) so the score/result shown while picking an
+ * element in the UI is exactly what a real `extract` node would compute, not a separate
+ * approximation. `source` is the raw fetched body text regardless of `sourceType` — for "json" and
+ * "xml" it's parsed server-side (the same parsing a real `extract` node would apply), never
+ * pre-parsed by the caller.
  */
 export const TestSelectorSchema = z.object({
-  html: z.string(),
+  source: z.string(),
+  sourceType: ExtractSourceType.default("html"),
   selectors: z.array(z.string()).min(1),
   output: ExtractOutputType.optional(),
   attribute: z.string().optional(),

@@ -16,7 +16,10 @@ export type {
 } from "./executors/types.js";
 
 export { conditionExecutor } from "./executors/conditionExecutor.js";
+export { dataTransformExecutor } from "./executors/dataTransformExecutor.js";
 export { extractExecutor } from "./executors/extractExecutor.js";
 export { httpExecutor } from "./executors/httpExecutor.js";
+export { loopExecutor } from "./executors/loopExecutor.js";
 export { setVariableExecutor } from "./executors/setVariableExecutor.js";
 export { stopExecutor } from "./executors/stopExecutor.js";
+export { textCryptoExecutor } from "./executors/textCryptoExecutor.js";

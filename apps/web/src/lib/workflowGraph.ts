@@ -192,6 +192,33 @@ export function createDefaultNode(type: ActionNode["type"], id: string): ActionN
       return { id, name: "New Variables", type: "setVariable", variables: {} };
     case "stop":
       return { id, name: "Stop", type: "stop" };
+    case "dataTransform":
+      return {
+        id,
+        name: "New Traitement",
+        type: "dataTransform",
+        input: "",
+        inputType: "raw",
+        operations: [{ type: "trim" }],
+        outputType: "text",
+      };
+    case "textCrypto":
+      return {
+        id,
+        name: "New Crypto",
+        type: "textCrypto",
+        input: "",
+        operations: [{ type: "hash", algorithm: "sha256", digest: "hex" }],
+      };
+    case "loop":
+      return {
+        id,
+        name: "New Boucle",
+        type: "loop",
+        source: "",
+        body: [{ id: `${id}Step1`, name: "Étape 1", type: "setVariable", variables: {} }],
+        outputMode: "list",
+      };
     default: {
       const exhaustiveCheck: never = type;
       throw new Error(`Unsupported action node type: ${String(exhaustiveCheck)}`);

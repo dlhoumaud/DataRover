@@ -1,30 +1,15 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
-import type { ActionNode } from "@datarover/workflow-types";
 import type { FlowNode } from "../../lib/workflowGraph";
 import { useEditorStore } from "../../lib/editorStore";
+import { NODE_COLORS, NODE_LABELS } from "../../lib/nodeStyles";
 
 /**
- * Single generic React Flow node component reused for all five action node
- * types (see `nodeTypes` below) — the visual variation (color dot, handle
+ * Single generic React Flow node component reused for every action node
+ * type (see `nodeTypes` below) — the visual variation (color dot, handle
  * layout) is driven entirely by `data.node.type`, never by which key of
- * `nodeTypes` React Flow happened to look up.
+ * `nodeTypes` React Flow happened to look up. Colors/labels live in
+ * `lib/nodeStyles.ts`, shared with the node-creation palette.
  */
-
-const NODE_COLORS: Record<ActionNode["type"], string> = {
-  http: "bg-blue-500",
-  extract: "bg-purple-500",
-  condition: "bg-yellow-500",
-  setVariable: "bg-green-500",
-  stop: "bg-red-500",
-};
-
-const NODE_LABELS: Record<ActionNode["type"], string> = {
-  http: "http",
-  extract: "extract",
-  condition: "condition",
-  setVariable: "setVariable",
-  stop: "stop",
-};
 
 export function WorkflowNode({ id, data, selected }: NodeProps<FlowNode>): JSX.Element {
   const selectNode = useEditorStore((state) => state.selectNode);
@@ -94,4 +79,7 @@ export const nodeTypes = {
   condition: WorkflowNode,
   setVariable: WorkflowNode,
   stop: WorkflowNode,
+  dataTransform: WorkflowNode,
+  textCrypto: WorkflowNode,
+  loop: WorkflowNode,
 };

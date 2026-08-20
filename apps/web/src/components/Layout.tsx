@@ -1,6 +1,9 @@
 import type { ReactNode } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { useHealth } from "../api/health";
+
+/** Matches WorkflowEditorPage's route exactly (App.tsx) — not the .../executions sub-route. */
+const WORKFLOW_EDITOR_PATH = /^\/projects\/[^/]+\/workflows\/[^/]+$/;
 
 /**
  * Status badge reflecting the API health probe (see `useHealth`):
@@ -47,10 +50,19 @@ function HealthBadge(): JSX.Element {
   );
 }
 
+/**
+ * The workflow editor (React Flow + its own header/palette) is meant to fill the whole window —
+ * the standard `max-w-5xl` centered/padded content column everywhere else would otherwise box it
+ * in. Detected from the URL (rather than a prop `App.tsx` would have to thread through) since
+ * `Layout` wraps the whole `<Routes>` as a single instance.
+ */
 export function Layout({ children }: { children: ReactNode }): JSX.Element {
+  const location = useLocation();
+  const isWorkflowEditor = WORKFLOW_EDITOR_PATH.test(location.pathname);
+
   return (
-    <div className="min-h-screen bg-gray-50">
-      <header className="border-b border-gray-200 bg-white">
+    <div className={`flex flex-col bg-gray-50 ${isWorkflowEditor ? "h-screen overflow-hidden" : "min-h-screen"}`}>
+      <header className="flex-shrink-0 border-b border-gray-200 bg-white">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-3">
           <Link to="/" className="text-lg font-semibold text-gray-900 hover:text-gray-700">
             DataRover
@@ -63,7 +75,9 @@ export function Layout({ children }: { children: ReactNode }): JSX.Element {
           </nav>
         </div>
       </header>
-      <main className="mx-auto max-w-5xl px-4 py-8">{children}</main>
+      <main className={isWorkflowEditor ? "flex min-h-0 flex-1 flex-col" : "mx-auto max-w-5xl px-4 py-8"}>
+        {children}
+      </main>
     </div>
   );
 }

@@ -30,6 +30,16 @@ export interface NodeExecutionContext {
   variables: EngineVariables;
   actionsOutput: Record<string, { output?: unknown }>;
   logger: Logger;
+  /**
+   * Recursively runs another node through the engine's own registered executors — used by
+   * `loopExecutor` to run each of its embedded body steps without duplicating the
+   * type-to-executor dispatch already implemented by `WorkflowEngine`. Optional (rather than
+   * required) specifically so the several existing executor test files' hand-built
+   * `NodeExecutionContext` fixtures don't all need updating for a capability only `loop` uses;
+   * every real context built by `WorkflowEngine.run` provides it.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  runNode?: (node: any, ctx: NodeExecutionContext) => Promise<NodeExecutionResult>;
 }
 
 /**

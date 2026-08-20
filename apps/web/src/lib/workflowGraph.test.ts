@@ -205,7 +205,7 @@ describe("autoLayout", () => {
 });
 
 describe("createDefaultNode", () => {
-  it.each(["http", "extract", "condition", "setVariable", "stop"] as const)(
+  it.each(["http", "extract", "condition", "setVariable", "stop", "dataTransform", "textCrypto"] as const)(
     "produces a schema-valid node for type %s",
     (type) => {
       const node = createDefaultNode(type, `${type}Test`);

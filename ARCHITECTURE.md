@@ -245,7 +245,7 @@ exécuter le script du site cible dans l'application.
 Vérifié à nouveau contre le même site réel après le correctif des images/de la taille (mêmes outils,
 Selenium + inspection DOM réelle) : 67 images sur 67 chargées (`naturalWidth > 0`, 0 cassée), et la
 modale mesure 1572×882 dans une fenêtre de 1600×914 (plein écran, marge de cadrage seulement). Le
-scénario e2e navigateur committé (`apps/web/e2e/htmlPreview.e2e.test.ts`) couvre maintenant aussi
+scénario e2e navigateur committé (`apps/web/e2e/preview.e2e.test.ts`) couvre maintenant aussi
 l'édition en direct d'un candidat (cassé à la main → badge "non correspondant" après le debounce,
 sans perdre l'aperçu du candidat toujours valide).
 
@@ -304,12 +304,284 @@ JavaScript compris, chacun contre un serveur de fixture HTTP local réel — et 
 unitaires de `htmlSandbox.ts`).
 Parcours complet
 dans un vrai navigateur (Firefox headless), formalisé en scénario e2e committé
-(`apps/web/e2e/htmlPreview.e2e.test.ts`, inclus dans `pnpm test:e2e`) : création d'un node HTTP
+(`apps/web/e2e/preview.e2e.test.ts`, inclus dans `pnpm test:e2e`) : création d'un node HTTP
 pointé vers un vrai serveur de fixture local → ouverture de l'aperçu → **clic réel** sur un élément
 à l'intérieur de l'iframe sandboxée (bascule de contexte WebDriver dans le frame) → les sélecteurs
 candidats affichés correspondent exactement à l'exemple du cahier des charges
 (`[data-testid="title"]`, `.title`, `.product-card .title`) avec un score cohérent → validation → un
 node `extract` apparaît, relié au node http, avec la règle validée → sauvegarde réussie.
+
+## Itération 5 — Nodes de traitement de texte, code couleur de la palette, menu contextuel (livrée)
+
+| Zone | Contenu |
+|---|---|
+| `packages/workflow-types/src/action.ts` | Deux nouveaux types de node, chacun une **pipeline d'opérations** appliquées dans l'ordre (`input`, un `{{ }}` interpolé — même convention que `ExtractNode.source`) : `dataTransform` ("Traitement" dans l'éditeur — voir la refonte entrée/sortie ci-dessous) et `textCrypto` — voir le détail complet des algorithmes ci-dessous |
+| `packages/workflow-core/src/executors/{dataTransformExecutor,textCryptoExecutor}.ts` | Exécuteurs correspondants — opérations pures/synchrones (aucun I/O, donc pas de `timeoutMs`/`retryPolicy` sur ces nodes) ; `textCrypto` n'utilise que le module `crypto` natif de Node ; `dataTransform` s'appuie sur `fast-xml-parser`/`jsonpath-plus` (déjà utilisés par `@datarover/extractor`) et `yaml` (nouvelle dépendance) |
+| `apps/web/src/lib/nodeStyles.ts` | Source unique des couleurs/labels par type de node, partagée par le node du canvas (`WorkflowNode.tsx`) et les boutons de la palette (`NodePalette.tsx`) — la palette affiche désormais le même point de couleur que le node qu'elle crée, faisant office de légende |
+| `apps/web/src/components/inspectors/{DataTransformNodeInspector,TextCryptoNodeInspector}.tsx` | Formulaires d'édition de la pipeline (ajout/suppression/réordonnancement implicite par position, champs spécifiques à chaque type d'opération affichés dynamiquement) |
+| `apps/web/src/components/NodeContextMenu.tsx` + câblage dans `WorkflowEditorPage.tsx` | Menu contextuel personnalisé (React Flow n'en fournit pas) sur clic droit d'un node : Dupliquer (nouvel id via `generateNodeId`, position décalée, sélectionné automatiquement) et Supprimer (retire aussi les edges qui le référencent) — fermeture au clic extérieur, à `Échap`, ou après une action |
+
+**Vérifié** : 337 tests Vitest (`packages/workflow-types` +10, `packages/workflow-core` +20 pour les
+deux exécuteurs — hachages contre des vecteurs de test connus, chiffrement/déchiffrement
+aller-retour, IV aléatoire par appel — `apps/web` +2). Preuve d'exécution bout en bout réelle (pas
+seulement des tests unitaires isolés) : un workflow réel `setVariable → textTransform → textCrypto
+→ stop` créé via l'API, exécuté par le worker, dont la sortie de chaque node a été vérifiée
+indépendamment (`"  Produit Génial  "` → `"produit-génial"` → hash SHA-256 recalculé à la main et
+comparé bit à bit). Nouveau scénario e2e navigateur committé
+(`apps/web/e2e/nodeContextMenu.e2e.test.ts`) : tous les boutons de la palette ont un point de
+couleur, les deux nouveaux nodes s'ajoutent et s'éditent, le clic droit ouvre le menu, "Dupliquer"
+crée un node distinct (id différent, vérifié via l'attribut `data-id` de React Flow) et "Supprimer"
+ne retire que le node ciblé. Un vrai bug de script de test (pas de l'application) a été trouvé et
+corrigé en cours de route : réutiliser le même générateur d'actions Selenium pour deux clics droits
+successifs pouvait rejouer/empiler l'état du pointeur et faire atterrir le second clic droit sur le
+mauvais node — corrigé en recréant un générateur d'actions à chaque geste.
+
+### Éditeur en plein écran + extension de `textCrypto` (hash, chiffrement, encodage)
+
+**L'éditeur de workflow (React Flow + son en-tête/palette) occupe désormais toute la largeur et
+hauteur de la fenêtre.** `Layout.tsx` enveloppait chaque page dans une colonne centrée
+`max-w-5xl` avec du padding — adapté aux pages de contenu, pas à un canevas. `Layout` détecte
+maintenant la route de l'éditeur (`/projects/:id/workflows/:id`, via `useLocation`, sans avoir à
+faire remonter une prop à travers `App.tsx`) et ne lui applique ni la largeur max, ni le padding,
+ni le scroll de page (`h-screen overflow-hidden` + `flex-1 min-h-0` plutôt que `min-h-screen`) —
+les autres pages ne sont pas affectées (vérifié : largeur de leur `<main>` inchangée).
+
+Ce changement a révélé un vrai bug latent dans `NodeContextMenu` : sans scroll de page possible,
+un menu contextuel ouvert près du bord bas/droit de la fenêtre pouvait se positionner
+**partiellement hors écran et devenir totalement inatteignable** (avant, un défilement de page
+accidentel le "sauvait"). Fixé en mesurant la taille réelle du menu après montage
+(`useLayoutEffect`) et en recalant sa position pour qu'il reste entièrement dans le viewport.
+
+**`textCrypto` couvrait trop peu d'algorithmes** (uniquement md5/sha1/sha256/sha512 pour `hash`,
+AES-256-CBC pour `encrypt`/`decrypt`, aucun encodage URL). Chaque algorithme ajouté a été vérifié
+disponible sur ce build Node (`crypto.getHashes()`/`crypto.getCiphers()`) avant d'être proposé —
+DES simple, RC4 et Blowfish sont volontairement absents : OpenSSL 3 les désactive par défaut (ils
+n'apparaissaient même pas comme disponibles), et ce sont de toute façon des chiffrements cassés.
+
+- **`hash`** : + sha224, sha384, sha3-224/256/384/512, ripemd160, blake2b512, blake2s256.
+- **`encrypt`/`decrypt`** : nouveau champ `algorithm` (optionnel — absent, il vaut
+  implicitement `aes-256-cbc`, pour que les workflows sauvegardés avant ce champ continuent de se
+  parser sans modification) parmi aes-128/192/256-cbc, aes-128/192/256-gcm, des-ede3-cbc (3DES) et
+  chacha20-poly1305. La dérivation de clé passe de `sha256(passphrase)` à `scrypt` (memory-hard,
+  volontairement lent) — nettement plus résistant au brute-force d'une passphrase faible — et gère
+  désormais des longueurs de clé variables (16/24/32 octets) selon l'algorithme. Pour les
+  algorithmes authentifiés (GCM, chacha20-poly1305) le tag d'authentification est calculé/vérifié
+  (`getAuthTag`/`setAuthTag`) et embarqué dans la sortie base64 aux côtés de l'IV — un texte
+  chiffré altéré est rejeté explicitement au déchiffrement (propriété vérifiée par un test dédié).
+- **RSA (asymétrique)**, ajouté comme deux opérations à part — `rsaEncrypt` (clé publique PEM) et
+  `rsaDecrypt` (clé privée PEM) — plutôt que forcé dans la forme "passphrase" des chiffrements
+  symétriques, puisque ce n'est ni la même famille cryptographique ni la même UX (pas de
+  passphrase, une paire de clés). RSA-OAEP/SHA-256 via `crypto.publicEncrypt`/`privateDecrypt` ;
+  la taille du texte source est bornée par la taille de la clé (≈190 octets pour 2048 bits), une
+  entrée trop longue lève une erreur Node explicite plutôt que d'être tronquée silencieusement.
+- **`encode`/`decode`** : + `url` (`encodeURIComponent`/`decodeURIComponent` — un cas à part,
+  géré spécifiquement dans l'exécuteur puisque ce n'est pas un encodage `Buffer`).
+
+**Vérifié** : 363 tests Vitest (+26 : `packages/workflow-types` pour les nouveaux schémas,
+`packages/workflow-core` pour les exécuteurs — vecteurs de test connus pour chaque nouveau hash,
+aller-retour chiffrement/déchiffrement pour chaque nouveau chiffrement symétrique, rejet d'un
+texte chiffré altéré en GCM, rejet d'un déchiffrement avec un algorithme différent de celui du
+chiffrement, aller-retour RSA avec une vraie paire de clés générée pour le test, rejet d'un texte
+trop long pour RSA, aller-retour url encode/decode). Preuve d'exécution bout en bout réelle : un
+workflow `setVariable → textCrypto(url encode) → textCrypto(AES-256-GCM encrypt) →
+textCrypto(AES-256-GCM decrypt) → textCrypto(url decode) → textCrypto(RSA encrypt) →
+textCrypto(RSA decrypt) → stop` créé via l'API et exécuté par le vrai worker, avec une vraie paire
+de clés RSA générée pour l'occasion — chaque sortie intermédiaire vérifiée, le texte ressort
+identique à l'original après le aller-retour complet.
+
+### Le node "Texte" devient "Traitement" : entrée/sortie typées, plus un vrai bug XML trouvé au passage
+
+Renommé `textTransform` → `dataTransform` (littéral interne ; libellé affiché "Traitement" —
+choisi par l'utilisateur parmi "Traitement"/"Flux"/"Payload"), et étendu avec :
+
+- **`inputType`** (`raw`/`json`/`yaml`/`xml`) : détermine comment `input` est interprété avant la
+  pipeline. Si la valeur interpolée est déjà une valeur JS non-string (un node `http` amont en
+  `responseType: "json"` transmet déjà un objet/tableau parsé, jamais une chaîne re-encodée — voir
+  httpExecutor.ts), elle est utilisée telle quelle ; sinon elle est parsée (`JSON.parse`, le
+  package `yaml`, ou `fast-xml-parser`).
+- **`outputType`** (`text`/`list`/`table`/`int`/`float`/`boolean`) : une étape de coercition finale
+  (pas une simple étiquette) normalise systématiquement la sortie vers ce type, quel que soit ce
+  que la pipeline a produit — utile en particulier pour `getPath`, dont le type de résultat n'est
+  pas connu statiquement. `table` produit un tableau d'objets-lignes (encapsulant si besoin
+  chaque scalaire, ou les entrées d'un objet) — distinct de `list`, qui garantit seulement un
+  tableau sans remodeler son contenu.
+- **Catalogue d'opérations selon `inputType`** : `raw` propose les opérations texte existantes
+  (lower…padEnd) ; `json`/`yaml`/`xml` proposent des opérations sur la valeur parsée (`getPath` en
+  JSONPath — même syntaxe que le node Extraction —, `keys`, `values`, `toArray`, `length`,
+  `stringify`) ; `toInt`/`toFloat`/`toBoolean` sont proposées dans tous les cas.
+- **Type de sortie automatique** : l'inspecteur met à jour `outputType` dès que le type de la
+  *dernière* opération de la pipeline change (ex : sélectionner `toInt` en dernière étape passe
+  la sortie sur "Entier"), reste ensuite un champ normal, modifiable à la main.
+
+**Vrai bug pré-existant trouvé en construisant cette fonctionnalité (pas introduit par elle) :**
+`fast-xml-parser` utilise par défaut le préfixe `"@_"` pour les attributs XML, mais `jsonpath-plus`
+(utilisé par CHAQUE sélecteur JSONPath de l'app, y compris ceux du node `extract` déjà livré)
+traite un `@` isolé comme son propre symbole "nœud courant" — vérifié directement que
+`$.item['@_id']` lève une exception à l'intérieur de `jsonpath-plus` dès que `item` désigne un
+objet unique plutôt qu'un tableau (un élément XML qui ne se répète pas). Le seul test existant
+(`xmlExtractor.test.ts`) n'exerçait qu'un élément répété (`product[0]['@_id']`), qui contourne le
+bug par hasard — l'accès par index de tableau ne déclenche jamais le problème, seul l'accès direct
+à un objet le fait. Concrètement : le node `extract` existant, pointé sur `sourceType: "xml"`, n'a
+**jamais** correctement extrait l'attribut d'un élément XML non répété via JSONPath — l'échec était
+silencieux (`value: undefined`, sans erreur visible). Corrigé dans `xmlExtractor.ts` (utilisé par
+`extract`) et `dataTransformExecutor.ts` en changeant le préfixe pour `"attr_"` — sans `@`, aucune
+collision possible, confirmé pour les deux formes (objet unique et tableau). Test de régression
+ajouté pour le cas non-tableau, en plus du test existant corrigé.
+
+**Vérifié** : 374 tests Vitest (+11 : `packages/extractor` pour le bug XML corrigé,
+`packages/workflow-types` pour le nouveau schéma, `packages/workflow-core` pour l'exécuteur —
+JSON/YAML/XML, `getPath` sur un élément XML unique, coercition vers chaque type de sortie).
+Vérification visuelle réelle (Firefox piloté par Selenium) : la palette affiche "+ Traitement", le
+catalogue d'opérations change bien selon le type d'entrée sélectionné (14 options en mode brut,
+9 en mode JSON), et le type de sortie se met à jour automatiquement à la sélection de la dernière
+opération. Preuve d'exécution bout en bout réelle : un workflow `setVariable → dataTransform(JSON,
+getPath, float) → dataTransform(YAML, getPath, float) → dataTransform(XML, getPath sur un
+attribut d'élément unique, text) → dataTransform(JSON, getPath vers un tableau, table) → stop`
+créé via l'API et exécuté par le vrai worker — chaque sortie intermédiaire correcte, y compris
+l'attribut XML sur l'élément unique qui aurait échoué avant le correctif.
+
+## Itération 6 — Preview JSON/XML, node Boucle, palette sans "+" (livrée)
+
+### Preview & sélection étendue au JSON/XML (Specs.md §6/§8, au-delà du HTML)
+
+Le même outil que l'itération 4 (bouton "Prévisualiser" sur un node `http`) fonctionne désormais
+pour `responseType: "json"` et `"xml"`, pas seulement `"html"` — masqué uniquement pour `"file"`
+(binaire, rien à afficher). `HtmlPreviewSelector.tsx` est renommé `PreviewSelector.tsx` (son rôle
+dépasse maintenant le HTML) et branche son rendu par `sourceType` :
+
+- **HTML** : inchangé — iframe sandboxée (voir itération 4).
+- **JSON/XML** : un nouveau composant `JsonTreeView.tsx` (React pur, aucun sandboxing nécessaire —
+  il ne rend jamais de HTML/script venant du site cible, seulement des valeurs JS en texte) affiche
+  un arbre colorisé (clés en indigo, chaînes en vert, nombres en bleu, booléens en violet, `null`
+  en gris italique) et repliable (▸/▾, chaque conteneur replié par défaut à partir de 2 niveaux de
+  profondeur, pour ne pas afficher des milliers de nœuds ouverts sur un vrai payload). Le XML est
+  parsé côté client avec `fast-xml-parser` (mêmes options que `xmlExtractor.ts` — préfixe `attr_`,
+  voir itération 5) uniquement pour l'affichage ; la source brute envoyée au backend pour tester un
+  sélecteur reste le texte XML original, jamais re-sérialisé, pour rester fidèle à une vraie
+  exécution.
+- **Clic sur un élément** : pour le HTML, inchangé (`postMessage` depuis l'iframe). Pour le
+  JSON/XML, `JsonTreeView` appelle directement `onSelect(path, value)` (même document, pas
+  d'iframe) ; `lib/jsonPath.ts` (nouveau) construit le JSONPath canonique correspondant
+  (`buildJsonPath(["items", 0, "price"])` → `"$.items[0].price"`). Contrairement aux sélecteurs CSS
+  (ambigus, donc plusieurs candidats scorés), un JSONPath dans un document concret est exactement
+  déterministe : un seul chemin, pas un ensemble de candidats à départager — c'est ce que l'outil
+  calcule ici, pas un score.
+
+Backend : `POST /tools/test-selector` renomme son champ `html` en `source` et ajoute `sourceType`
+(`html`/`json`/`xml`, défaut `html`), et délègue à `extractWithJsonPath`/`extractWithXml` de
+`@datarover/extractor` (déjà utilisés par le node `extract`) plutôt que de dupliquer une logique
+parallèle — la prévisualisation reste ainsi rigoureusement fidèle à ce qu'une vraie exécution
+produirait, exactement comme pour le CSS en itération 4.
+
+**Vérifié** : 406 tests Vitest au total dans le monorepo (+16 côté `apps/api` pour le nouveau
+dispatch JSON/XML de `test-selector`, +12 côté `apps/web` pour `buildJsonPath` et `JsonTreeView`).
+Nouveau scénario e2e navigateur committé (`apps/web/e2e/preview.e2e.test.ts`, renommé depuis
+`htmlPreview.e2e.test.ts`) : pointer un node HTTP vers une vraie réponse JSON, ouvrir l'aperçu,
+déplier un nœud replié par défaut, cliquer une valeur, vérifier que le candidat calculé est bien le
+JSONPath canonique (`$.items[0].price`), valider la règle, et confirmer qu'un node `extract` avec
+`sourceType: "json"` apparaît relié — en plus du scénario HTML existant, toujours vert.
+
+### Node "Boucle" — itération sur une liste/un tableau (Specs.md §9.5, "FOR EACH", scopé)
+
+- **`packages/workflow-types/src/action.ts`** : `LoopNodeSchema` (`type: "loop"`, `source` — un
+  `{{ }}` interpolé, même convention que `dataTransform.input`/`http.url`, qui doit s'évaluer en
+  tableau — et `outputMode: "list" | "last"`, défaut `"list"`) porte un **corps intégré** :
+  `body: LoopBodyNodeSchema[]` (min. 1), une petite séquence ordonnée d'étapes stockée directement
+  sur le node, plutôt qu'un sous-graphe visible avec une boucle de rappel — choix délibéré (validé
+  avec l'utilisateur) pour ne toucher à rien dans la détection de cycles/le parcours du moteur
+  (`validateDefinition`, `getNextNodeId`, `DEFAULT_MAX_STEPS`) : une boucle n'introduit ainsi
+  jamais un vrai cycle dans le graphe lui-même. `LoopBodyNodeSchema` exclut délibérément
+  `condition` (pas de cible de branchement dans une séquence linéaire), `stop` (terminerait tout le
+  workflow en pleine itération, jamais l'intention) et `loop` (pas de boucle imbriquée dans cette
+  itération).
+- **Liaison par itération** : chaque étape du corps voit `{{ item }}` (l'élément courant) et
+  `{{ runtime.index }}` / `{{ runtime.isFirst }}` / `{{ runtime.isLast }}` — des emplacements déjà
+  prévus et génériquement résolus par `@datarover/expression-engine` (`ExpressionContext.item`/
+  `.runtime`, déjà documentés avant même ce node), donc aucune modification du moteur d'expressions
+  n'a été nécessaire. Pas de nom de variable configurable : toute étape du corps lit l'élément
+  courant via le nom fixe `item`, de la même façon qu'un node lit les sorties précédentes via le
+  nom fixe `actions`.
+- **`packages/workflow-core/src/executors/types.ts`** : `NodeExecutionContext` gagne un champ
+  optionnel `runNode` — permet à un exécuteur de faire re-tourner un autre node à travers le
+  dispatch d'exécuteurs du moteur lui-même, sans le dupliquer. Optionnel spécifiquement pour ne pas
+  avoir à modifier les fixtures `NodeExecutionContext` des exécuteurs existants qui n'en ont pas
+  besoin.
+- **`packages/workflow-core/src/engine.ts`** : `runNode` est câblé dans `WorkflowEngine.run()`,
+  fermé sur son propre registre d'exécuteurs, en réutilisant exactement `withRetry`/`withTimeout` —
+  une étape du corps profite donc de son propre `timeoutMs`/`retryPolicy` comme n'importe quel
+  node.
+- **`packages/workflow-core/src/executors/loopExecutor.ts`** : interpole `source`, exige un vrai
+  tableau (sinon erreur explicite — une source qui ne s'évalue pas en tableau est presque
+  certainement une erreur de configuration, pas un cas à absorber silencieusement). Chaque
+  itération obtient un bucket `actionsOutput` **isolé** (initialisé à partir d'une copie de celui
+  du scope englobant, pour que les étapes du corps puissent toujours lire les sorties des nodes
+  précédents, puis alimenté au fil des étapes de cette même itération) — rien n'en ressort jamais
+  vers le scope englobant : seule la sortie globale du node `loop` lui-même traverse la frontière,
+  ce qui évite qu'un node en aval ait à deviner "la sortie de quelle itération" une étape du corps
+  désignerait. `variables` (les buckets `global`/`project`/`workflow`), en revanche, est la même
+  référence mutable que le scope englobant : une étape `setVariable` du corps s'accumule donc à
+  travers les itérations et reste visible après la boucle, exactement comme un `setVariable`
+  n'importe où ailleurs dans le graphe.
+- **`apps/web/src/components/inspectors/LoopNodeInspector.tsx`** : édite `name`/`source`/
+  `outputMode`, plus un éditeur du corps — chaque étape se replie/déplie et, dépliée, réutilise
+  **le même composant d'inspection que ce type de node utilise partout ailleurs dans l'éditeur**
+  (`HttpNodeInspector`, `ExtractNodeInspector`, ...), pas une réimplémentation. Deux coupes de
+  périmètre délibérées : `HttpNodeInspector` s'utilise ici sans `projectId`/`onCreateExtractNode`
+  (les deux désormais optionnels — le bouton "Prévisualiser" ne s'affiche simplement pas, câbler le
+  flux preview→extract récursivement dans un corps de boucle imbriqué est hors périmètre) ; et
+  `ExtractNodeInspector.availableNodeIds` n'expose que les étapes **précédentes** du corps (ordre
+  séquentiel, jamais une étape pas encore exécutée). Étapes ajoutables/supprimables (jusqu'au
+  minimum d'une imposé par le schéma), non réordonnables — position figée, coupe de périmètre
+  explicite.
+
+**Vérifié** : `packages/workflow-core` passe de 82 à 92 tests (+9 `loopExecutor.test.ts` : tableau
+vide, source non-tableau rejetée, liaison item/runtime, accumulation d'une variable `workflow.*` à
+travers les itérations via une étape `setVariable` du corps, une étape lisant la sortie d'une étape
+précédente de la même itération, `outputMode` "list" vs "last", `runNode` manquant détecté ; +1 cas
+d'intégration dans `engine.test.ts` prouvant le câblage réel de `runNode` — pas seulement contre un
+double de test — de bout en bout via le vrai `WorkflowEngine.run()`), `packages/workflow-types` de
+58 à 65 (schéma, corps vide/invalide rejeté, chaque type de node explicitement exclu du corps
+rejeté individuellement). Nouveau scénario e2e navigateur committé
+(`apps/web/e2e/loopNode.e2e.test.ts`) : création d'un node `loop` via la palette, réglage de
+`source` sur une variable globale du projet, dépliage/édition de l'étape par défaut du corps (une
+`setVariable` imbriquée, prouvant que la composition récursive d'inspecteurs fonctionne dans un
+vrai navigateur), sauvegarde, puis **rechargement complet de la page** et re-vérification que
+chaque champ a bien traversé l'aller-retour API.
+
+**Limite pré-existante découverte en écrivant ce scénario (pas introduite par cette itération) :**
+l'éditeur ne propose aucun moyen de changer le `startNodeId` d'un workflow après sa création — il
+reste figé sur le node `stop` créé par défaut à la création du workflow, quel que soit ce qu'on
+ajoute ensuite sur le canevas. `workflow.e2e.test.ts` (itération 3) contournait déjà silencieusement
+cette limite (son commentaire l'assume explicitement) : le node `http` qu'il configure n'est en
+réalité jamais exécuté, seul le `stop` par défaut l'est. Pour cette raison, `loopNode.e2e.test.ts`
+vérifie la création/configuration/persistance via l'UI plutôt qu'une exécution réussie en
+navigateur ; la preuve d'exécution réelle du node `loop` (liaison item/runtime, modes de sortie, le
+corps qui tourne réellement étape par étape) vit à la place dans `engine.test.ts`/
+`loopExecutor.test.ts` ci-dessus. Corriger cette limite (un sélecteur de node de départ dans
+l'éditeur) est hors périmètre de cette itération.
+
+### Panneau d'inspection redimensionnable
+
+`NodeInspectorPanel` avait une largeur fixe (`w-80`, 320px) — trop étroit pour éditer confortablement
+un node `loop` (corps intégré imbriqué) ou un node `http` avec beaucoup d'en-têtes. Un nouveau hook
+réutilisable, `apps/web/src/lib/useResizableWidth.ts`, gère le glisser-déposer d'une poignée
+(pointer events, pas de dépendance externe) : la poignée est sur le bord **gauche** du panneau
+(ancré à droite du layout), donc la faire glisser vers la gauche l'élargit. Largeur bornée
+(280–720px, défaut 320 — identique au comportement précédent) et persistée en `localStorage`
+(écrite une seule fois, au relâchement du pointeur — pas à chaque pixel pendant le glissement).
+
+**Vérifié** : 9 tests unitaires du hook (largeur par défaut/persistée/bornée/invalide, direction du
+glissement, persistance uniquement au relâchement, aucune réaction après la fin du glissement) +
+nouveau scénario e2e navigateur (`apps/web/e2e/inspectorPanelResize.e2e.test.ts`) : glissement réel
+de 100px vers la gauche via `driver.actions()`, largeur du panneau effectivement mesurée avant/après
+(`offsetWidth`), puis rechargement complet de la page confirmant la persistance.
+
+### Palette : suppression du préfixe "+"
+
+`NodePalette.tsx` affichait chaque bouton comme `+ {label}` (`+ HTTP`, `+ Traitement`, ...) — retiré
+(le point de couleur devant chaque libellé suffit à signaler "ceci ajoute un node"). Les sélecteurs
+Selenium qui ciblaient le texte exact (`nodeContextMenu.e2e.test.ts`) ont été mis à jour en
+conséquence.
 
 ## Explicitement hors périmètre à ce stade
 
@@ -322,7 +594,8 @@ node `extract` apparaît, relié au node http, avec la règle validée → sauve
   (`packages/workflow-core`, exécuteur `http`) reste strictement HTTP (Undici). Un rendu headless
   Playwright existe désormais, mais uniquement pour l'outil de preview interactif de l'éditeur (voir
   itération 4, "Rendu JavaScript") — une exécution de workflow réelle ne rend jamais de JS.
-- **`FOR EACH` / `WHILE`** (§9.5) — explicitement V2 dans le cahier des charges (§25).
+- **`WHILE`** (§9.5) — explicitement V2 dans le cahier des charges (§25). `FOR EACH` est livré,
+  scopé, en itération 6 (node `loop` — corps intégré, pas de boucle imbriquée, voir plus haut).
 - **Sorties** Webhook/Database/CSV (§9.6) — V2 (§25).
 - **XPath** comme stratégie d'extraction — le type existe, l'exécution lève une erreur explicite
   « planned for V2 ».
@@ -337,7 +610,9 @@ node `extract` apparaît, relié au node http, avec la règle validée → sauve
 1. ~~Backend exécutable~~ — livré (itération 2).
 2. ~~UI minimale~~ — livrée (itération 3).
 3. ~~Preview HTML + sélection visuelle~~ — livrée (itération 4).
-4. **Scheduler exécutable**, puis **Docker complet** (containerisation de
+4. ~~Nodes de traitement de texte + menu contextuel de l'éditeur~~ — livré (itération 5).
+5. ~~Preview JSON/XML + node Boucle~~ — livré (itération 6).
+6. **Scheduler exécutable**, puis **Docker complet** (containerisation de
    `web`/`api`/`worker`/`browser-worker`) et **coquille Electron**, dans l'esprit de la section 24
    (MVP v1).
 
@@ -350,7 +625,7 @@ docker compose up -d postgres redis     # ou: pnpm infra:up
 pnpm install                             # génère aussi le client Prisma
 pnpm db:migrate                          # première migration (interactif la 1ère fois : --name init)
 pnpm build
-pnpm test        # 305 tests Vitest (unitaires + intégration moteur + e2e api/worker sur vrai Postgres/Redis)
+pnpm test        # 415 tests Vitest (unitaires + intégration moteur + e2e api/worker sur vrai Postgres/Redis)
 pnpm lint
 pnpm typecheck
 
