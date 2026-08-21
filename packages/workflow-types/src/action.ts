@@ -14,6 +14,16 @@ export const HttpMethod = z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 export type HttpMethod = z.infer<typeof HttpMethod>;
 
 /**
+ * A node's position on the editor canvas. Optional (never `.default()`) so that a workflow saved
+ * before this field existed still parses unchanged — `apps/web`'s `definitionToFlow` falls back to
+ * its own computed `autoLayout` position for any node where this is absent, exactly as if the field
+ * had never been added. Persisted verbatim otherwise: unlike everything else on `BaseNodeSchema`,
+ * this carries no execution meaning at all, purely an editor affordance.
+ */
+export const NodePositionSchema = z.object({ x: z.number(), y: z.number() });
+export type NodePosition = z.infer<typeof NodePositionSchema>;
+
+/**
  * Fields shared by every node type in a workflow graph.
  * Not exported: consumers should rely on the discriminated `ActionNodeSchema`
  * union (and its inferred `ActionNode` type) rather than this base shape.
@@ -23,6 +33,7 @@ const BaseNodeSchema = z.object({
   name: z.string(),
   timeoutMs: z.number().int().positive().optional(),
   retryPolicy: RetryPolicySchema.optional(),
+  position: NodePositionSchema.optional(),
 });
 
 /**

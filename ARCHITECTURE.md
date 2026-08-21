@@ -1276,6 +1276,46 @@ retourné en son contraire exact. 13/13 tests dans `session-live.e2e.test.ts`, v
 contre la vraie stack (une frappe "h" dans une session enregistrée → `{"type":"press","key":"h"}`
 reçu).
 
+## Itération 11 — Mise en page persistée (position des nodes), à la demande explicite de l'utilisateur
+
+Jusqu'ici (itération 3), la position de chaque node à l'écran était **entièrement éphémère** :
+recalculée par un BFS déterministe (`autoLayout`, `workflowGraph.ts`) à **chaque** chargement d'un
+workflow, jamais lue depuis ni écrite vers la définition persistée — glisser un node réorganisait
+bien l'affichage local et marquait l'éditeur "modifié", mais `flowToDefinition` ignorait
+explicitement la position au moment d'enregistrer. Rouvrir un workflow perdait donc toujours toute
+réorganisation manuelle. Signalé par l'utilisateur : "il faudrait maintenant enregistrer la
+disposition des nodes dans le workflow".
+
+- **Schéma** (`packages/workflow-types/src/action.ts`) : nouveau `NodePositionSchema` (`{x, y}`,
+  deux `number`), ajouté en `position?: NodePositionSchema` sur `BaseNodeSchema` — donc hérité par
+  tous les types de node, `BrowserActionNodeSchema` compris malgré son `.strict()` : ce dernier ne
+  rejette que les clés absentes de la forme résultante, et `position` en fait partie via la chaîne
+  `.omit({retryPolicy:true}).extend({...})` qui part bien de `BaseNodeSchema`. Optionnel (jamais
+  `.default()`) : une définition enregistrée avant cette itération continue de parser sans aucune
+  migration — `definition` est une simple colonne `Json` côté Prisma, aucun changement de schéma
+  de base de données n'a été nécessaire non plus.
+- **`apps/web/src/lib/workflowGraph.ts`** : `definitionToFlow` préfère désormais `node.position`
+  quand il existe, et n'invoque `autoLayout` que comme filet de sécurité pour les nodes qui n'en
+  ont pas encore (nouveau node, ou workflow enregistré avant cette itération). `flowToDefinition`
+  écrit la position React Flow *actuelle* de chaque node sur le node du domaine au moment de
+  l'enregistrer — c'est le seul endroit où une réorganisation manuelle devient réellement
+  persistée. Aucun autre changement nécessaire dans `WorkflowEditorPage.tsx` : `onNodesChange`
+  alimentait déjà l'état local `nodes` à chaque glissement (et marquait l'éditeur "modifié"), et
+  `handleSave` appelait déjà `flowToDefinition` avec cet état — seul le fait que cette fonction
+  ignorait la position jusqu'ici bloquait la persistance.
+- **Aucun changement** côté `apps/api` (DTOs/contrôleur/service dérivent tous directement de
+  `WorkflowDefinitionSchema`, donc valident/acceptent le nouveau champ sans modification) ni côté
+  `packages/database` (colonne `Json`, pas de migration).
+
+**Vérifié** : nouveaux tests unitaires (`workflowGraph.test.ts`, 3 ajoutés, 28 au total) — une
+position déjà enregistrée est préservée telle quelle (pas recalculée par `autoLayout`) ; un
+déplacement simulé sur le canvas est bien capturé à l'enregistrement ; le round-trip
+`definitionToFlow`/`flowToDefinition` reste structurellement identique par ailleurs. Vérifié en
+direct contre la vraie stack Docker : un workflow créé via l'API réelle avec
+`"position": {"x":123,"y":456}` sur un node, relu ensuite via `GET /workflows/:id` — position
+identique, aucune perte. `pnpm turbo run typecheck lint test` (46/46 tâches) sans régression sur
+l'ensemble du monorepo, y compris les suites e2e navigateur réel (`browser-worker`, `api`).
+
 ## Explicitement hors périmètre à ce stade
 
 - **WebSocket temps réel pour les exécutions/logs** (§17.12) — le moteur émet déjà des événements
@@ -1305,8 +1345,10 @@ reçu).
   « planned for V2 ».
 - **Credentials/Auth**, **application Electron** (§17.3, §24) — seule la coquille Electron reste à
   faire pour boucler la section 24 (MVP v1) ; Docker complet est livré (itération 8).
-- **Drag-and-drop riche, undo/redo, mise en page persistée** dans l'éditeur visuel — la position
-  des nodes est recalculée à chaque chargement (voir itération 3 ci-dessus), pas sauvegardée.
+- **Drag-and-drop riche, undo/redo** dans l'éditeur visuel — **la mise en page (position des
+  nodes) est désormais persistée**, levant partiellement cette entrée (voir itération 11
+  ci-dessous) ; le reste (glisser-déposer depuis une palette externe, annuler/refaire) reste hors
+  périmètre.
 
 ## Prochaines itérations (proposition, non engageante)
 
@@ -1320,7 +1362,8 @@ reçu).
 8. ~~Node Navigateur (`browserAction`), exécution batch~~ — livré (itération 9, Phase A).
 9. ~~Node Navigateur : preview live (WebSocket + screencast CDP) + enregistrement des actions~~ —
    livré (itération 10, Phases B/C).
-10. **Coquille Electron**, dans l'esprit de la section 24 (MVP v1) — dernière pièce manquante avant
+10. ~~Mise en page persistée (position des nodes)~~ — livré (itération 11).
+11. **Coquille Electron**, dans l'esprit de la section 24 (MVP v1) — dernière pièce manquante avant
     ce jalon.
 
 ## Comment vérifier
@@ -1332,7 +1375,7 @@ docker compose up -d postgres redis     # ou: pnpm infra:up
 pnpm install                             # génère aussi le client Prisma
 pnpm db:migrate                          # première migration (interactif la 1ère fois : --name init)
 pnpm build
-pnpm test        # 600 tests Vitest (unitaires + intégration moteur + e2e api/worker sur vrai Postgres/Redis)
+pnpm test        # 604 tests Vitest (unitaires + intégration moteur + e2e api/worker sur vrai Postgres/Redis)
 pnpm lint
 pnpm typecheck
 

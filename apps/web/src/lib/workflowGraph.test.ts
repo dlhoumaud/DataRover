@@ -70,7 +70,7 @@ function buildDefinition(): WorkflowDefinition {
 }
 
 describe("definitionToFlow / flowToDefinition round trip", () => {
-  it("reconstructs a structurally identical WorkflowDefinition", () => {
+  it("reconstructs a structurally identical WorkflowDefinition, aside from the position autoLayout fills in", () => {
     const definition = buildDefinition();
     const { nodes, edges } = definitionToFlow(definition);
 
@@ -85,8 +85,46 @@ describe("definitionToFlow / flowToDefinition round trip", () => {
     expect(rebuilt.id).toBe(definition.id);
     expect(rebuilt.name).toBe(definition.name);
     expect(rebuilt.startNodeId).toBe(definition.startNodeId);
-    expect(rebuilt.nodes).toEqual(definition.nodes);
+    // None of `definition`'s nodes were saved with a position — `definitionToFlow` fell back to
+    // `autoLayout` for all of them, and `flowToDefinition` wrote that computed position straight
+    // back. Structurally identical otherwise.
+    expect(rebuilt.nodes.map(({ position, ...rest }) => rest)).toEqual(definition.nodes);
+    expect(rebuilt.nodes.every((node) => typeof node.position?.x === "number")).toBe(true);
     expect(rebuilt.edges).toEqual(definition.edges);
+  });
+
+  it("preserves a node's saved position exactly, rather than recomputing it via autoLayout", () => {
+    const definition = buildDefinition();
+    definition.nodes[0]!.position = { x: 42, y: 99 };
+    const { nodes, edges } = definitionToFlow(definition);
+
+    expect(nodes.find((n) => n.id === "http1")?.position).toEqual({ x: 42, y: 99 });
+
+    const rebuilt = flowToDefinition({
+      id: definition.id,
+      name: definition.name,
+      startNodeId: definition.startNodeId,
+      nodes,
+      edges,
+    });
+    expect(rebuilt.nodes.find((n) => n.id === "http1")?.position).toEqual({ x: 42, y: 99 });
+  });
+
+  it("captures a manually moved node's new position on save", () => {
+    const definition = buildDefinition();
+    const { nodes, edges } = definitionToFlow(definition);
+
+    // Simulate the user dragging #http1 to a new spot on the canvas.
+    const moved = nodes.map((node) => (node.id === "http1" ? { ...node, position: { x: 500, y: 500 } } : node));
+
+    const rebuilt = flowToDefinition({
+      id: definition.id,
+      name: definition.name,
+      startNodeId: definition.startNodeId,
+      nodes: moved,
+      edges,
+    });
+    expect(rebuilt.nodes.find((n) => n.id === "http1")?.position).toEqual({ x: 500, y: 500 });
   });
 
   it("carries the domain node object through unchanged for every FlowNode", () => {

@@ -14,9 +14,12 @@ import type {
  * distinct from, the React Flow `Edge`. Follow this convention in any file
  * that touches both the workflow domain model and React Flow.
  *
- * More broadly: React Flow (nodes/edges/positions) is only ever a visual
- * representation of a `WorkflowDefinition`. It is never the source of
- * truth, and layout (node position) is never persisted — see `autoLayout`.
+ * More broadly: React Flow (nodes/edges) is only ever a visual
+ * representation of a `WorkflowDefinition` — it is never the source of truth. Node *position* is
+ * the one exception: it's carried on the domain node itself (`ActionNode.position`, optional) so a
+ * manually-arranged layout survives a reload, but `WorkflowDefinition` still never derives any
+ * *behavior* from it — a node with no saved position is exactly as valid as one with one, see
+ * `autoLayout`.
  */
 
 /** Data payload attached to every React Flow node: the domain node itself. */
@@ -104,9 +107,10 @@ export function findUnreachableNodeIds(nodes: readonly FlowNode[], edges: readon
 }
 
 /**
- * Computes a deterministic position for every node in `definition`, purely
- * for visual display — `WorkflowDefinition` never carries layout data, so
- * this is recomputed on every load rather than persisted.
+ * Computes a deterministic position for every node in `definition` that doesn't already have one
+ * saved (`node.position`) — a fallback for brand-new nodes and for workflows saved before layout
+ * persistence existed, not the primary source of position once a user has actually arranged the
+ * canvas. `definitionToFlow` only consults this for nodes missing `position`.
  *
  * Nodes reachable from `startNodeId` are placed by BFS depth: `x = depth *
  * 260`, `y = indexAtThatDepth * 140`. Nodes not reachable from the start
@@ -170,17 +174,18 @@ export function autoLayout(definition: WorkflowDefinition): Map<string, { x: num
 }
 
 /**
- * Converts a `WorkflowDefinition` into React Flow's `nodes`/`edges` shape,
- * computing a fresh layout via `autoLayout`. Purely a view-model
- * transformation — never mutates or reads back into the definition.
+ * Converts a `WorkflowDefinition` into React Flow's `nodes`/`edges` shape. Each node's saved
+ * `position` wins when present — `autoLayout` only fills in a computed one for a node that doesn't
+ * have one yet (brand new, or saved before layout persistence existed). Purely a view-model
+ * transformation either way — never mutates the definition.
  */
 export function definitionToFlow(definition: WorkflowDefinition): { nodes: FlowNode[]; edges: FlowEdge[] } {
-  const positions = autoLayout(definition);
+  const fallbackPositions = autoLayout(definition);
 
   const nodes: FlowNode[] = definition.nodes.map((node) => ({
     id: node.id,
     type: node.type,
-    position: positions.get(node.id) ?? { x: 0, y: 0 },
+    position: node.position ?? fallbackPositions.get(node.id) ?? { x: 0, y: 0 },
     data: { node },
   }));
 
@@ -195,9 +200,10 @@ export function definitionToFlow(definition: WorkflowDefinition): { nodes: FlowN
 }
 
 /**
- * Reconstructs a `WorkflowDefinition` from the editor's current React Flow
- * state. Node/edge position is purely visual and is never read here — it
- * is not, and never has been, part of the domain model.
+ * Reconstructs a `WorkflowDefinition` from the editor's current React Flow state. Each node's
+ * current on-canvas `position` is written back onto its domain node (overwriting whatever
+ * `position` it may have carried before) — this is the one place a manually-arranged layout
+ * actually becomes part of what gets saved; `definitionToFlow` is what reads it back afterwards.
  */
 export function flowToDefinition(params: {
   id: string;
@@ -212,7 +218,7 @@ export function flowToDefinition(params: {
     id,
     name,
     startNodeId,
-    nodes: nodes.map((flowNode) => flowNode.data.node),
+    nodes: nodes.map((flowNode) => ({ ...flowNode.data.node, position: flowNode.position })),
     edges: edges.map((flowEdge) => {
       const domainEdge: DomainEdge = {
         from: flowEdge.source,
