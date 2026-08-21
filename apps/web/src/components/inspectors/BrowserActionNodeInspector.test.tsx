@@ -1,7 +1,48 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import type { BrowserActionNode } from "@datarover/workflow-types";
 import { BrowserActionNodeInspector } from "./BrowserActionNodeInspector";
+
+/** Same fake used by BrowserSessionPreview.test.tsx — the live-preview modal it drives is
+ *  already thoroughly tested on its own there; the one thing worth covering *here* is that a
+ *  validated recording actually lands in this node's own `steps`, not the preview UI itself. */
+class FakeWebSocket {
+  static readonly OPEN = 1;
+  static instances: FakeWebSocket[] = [];
+  readyState = 0;
+  private listeners: Record<string, Array<(event: unknown) => void>> = {};
+
+  constructor(public url: string) {
+    FakeWebSocket.instances.push(this);
+  }
+
+  addEventListener(type: string, handler: (event: unknown) => void): void {
+    (this.listeners[type] ??= []).push(handler);
+  }
+
+  send(): void {
+    // Not asserted on here — BrowserSessionPreview.test.tsx already covers what gets sent.
+  }
+
+  close(): void {
+    this.readyState = 3;
+  }
+
+  open(): void {
+    this.readyState = FakeWebSocket.OPEN;
+    this.dispatch("open", {});
+  }
+
+  receive(message: unknown): void {
+    this.dispatch("message", { data: JSON.stringify(message) });
+  }
+
+  private dispatch(type: string, event: unknown): void {
+    for (const handler of this.listeners[type] ?? []) {
+      handler(event);
+    }
+  }
+}
 
 /** `Array.prototype.at`-style indexing, but throwing instead of returning `undefined` — the
  *  project's `noUncheckedIndexedAccess` tsconfig option means a plain `items[index]` (or
@@ -30,6 +71,11 @@ function defaultNode(overrides?: Partial<BrowserActionNode>): BrowserActionNode 
 }
 
 describe("BrowserActionNodeInspector", () => {
+  beforeEach(() => {
+    FakeWebSocket.instances = [];
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+  });
+
   it("commits a startUrl edit once every step already parses (regression: a freshly-created node used to never save anything)", async () => {
     const onChange = vi.fn();
     render(<BrowserActionNodeInspector node={defaultNode()} onChange={onChange} />);
@@ -333,6 +379,35 @@ describe("BrowserActionNodeInspector", () => {
         { type: "wait", ms: 500 },
         { type: "click", selector: "#step2" },
         { type: "dragTo", sourceSelector: "#a", targetSelector: "#b" },
+      ]);
+    });
+  });
+
+  it("appends every action validated from the live preview to the node's own steps", async () => {
+    const onChange = vi.fn();
+    render(
+      <BrowserActionNodeInspector
+        node={defaultNode({ startUrl: "https://example.com/login" })}
+        onChange={onChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("Aperçu en direct & enregistrement d'actions"));
+    const socket = FakeWebSocket.instances.at(-1);
+    if (!socket) {
+      throw new Error("BrowserSessionPreview did not open a WebSocket");
+    }
+    socket.open();
+    socket.receive({ type: "ready", viewport: { width: 1280, height: 720 } });
+    socket.receive({ type: "action", step: { type: "click", selector: "#submit" } });
+
+    fireEvent.click(await screen.findByText("Valider (1 action)"));
+
+    await waitFor(() => {
+      const latest = onChange.mock.calls.at(-1)?.[0] as BrowserActionNode;
+      expect(latest.steps).toEqual([
+        { type: "wait", ms: 500 }, // defaultNode()'s own initial step, untouched
+        { type: "click", selector: "#submit" },
       ]);
     });
   });

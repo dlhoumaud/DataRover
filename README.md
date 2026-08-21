@@ -12,7 +12,7 @@ réel d'avancement (ce qui est implémenté vs le reste de la vision) est docume
 
 ## État actuel
 
-Neuf itérations livrées : le **moteur de workflow** (packages TypeScript purs), un **backend
+Dix itérations livrées : le **moteur de workflow** (packages TypeScript purs), un **backend
 exécutable** (API NestJS + PostgreSQL + worker BullMQ), une **UI React** (éditeur visuel React
 Flow, **plein écran**, panneau d'inspection redimensionnable) branchée dessus, l'outil de
 **preview HTML/JSON/XML + sélection visuelle d'éléments** (cliquer un élément dans un aperçu
@@ -30,9 +30,11 @@ clavier caractère par caractère, survol, glisser-déposer, déplacement de sou
 précise ou aléatoire) via un vrai navigateur Playwright piloté par `browser-worker` — avec, pour la
 frappe et les déplacements de souris, un délai optionnel **fixe ou aléatoire** (min–max, tiré à
 nouveau à chaque exécution) pour simuler un temps de réaction humain plutôt qu'une cadence
-parfaitement régulière. Pour l'instant en configuration manuelle de la séquence d'actions dans
-l'inspecteur ; la preview live avec enregistrement des actions arrive dans une itération suivante.
-Le panneau d'inspection affiche désormais, pour tout node, ses **variables de sortie**
+parfaitement régulière. Ce node dispose aussi d'une **preview live avec enregistreur d'actions** :
+un bouton dans son inspecteur ouvre un aperçu du navigateur en direct (streaming vidéo via
+screencast CDP), pilotable à la souris/au clavier depuis le navigateur de l'utilisateur, avec un
+bouton "Enregistrer" qui détecte clic/sélection/frappe et les propose comme actions à ajouter au
+node. Le panneau d'inspection affiche désormais, pour tout node, ses **variables de sortie**
 (`{{ actions.http1.output.status }}`, etc., un clic pour copier), et chaque champ `{{ }}` de
 l'éditeur propose une **autocomplétion** de ces variables (et des variables globales du projet) dès
 qu'on tape `{{`. Reste **Electron** (voir [`ARCHITECTURE.md`](./ARCHITECTURE.md) pour le détail et
@@ -45,6 +47,7 @@ packages/
 ├── expression-engine    interpolation {{ }} + évaluateur d'expressions contrôlé
 ├── extractor            extraction CSS / JSONPath / XML / Regex
 ├── workflow-core        le moteur d'exécution de workflow
+├── browser-scripts      fonctions de calcul de sélecteur partagées preview iframe ↔ enregistreur
 ├── database             schéma Prisma + client partagé (Project/Workflow/Execution/...)
 └── queue                contrat partagé API↔worker pour la file BullMQ
 
@@ -242,6 +245,36 @@ les anciennes fonctionnent toujours — pas une erreur de validation en apparenc
 modifié, juste "certaines actions/valeurs ne s'enregistrent pas". Un `docker compose restart api
 worker browser-worker` (ou le service concerné) force chacun à relire son `dist/` à jamais au
 prochain démarrage, sans reconstruire d'image.
+
+**Un quatrième cas** : le volume anonyme `node_modules` d'un service peut rester incomplet même
+juste après un `--force-recreate -V` (client Prisma jamais généré, lien de workspace manquant vers
+un package tout juste ajouté) — l'écart reste invisible tant qu'aucun changement de fichier ne
+force `nest start --watch`/`tsx watch` à recompiler, donc peut n'apparaître que des heures plus
+tard, au premier changement réel. Symptôme côté `api`/`worker` : des dizaines d'erreurs
+`tsc` sur des propriétés Prisma pourtant réelles ; côté `browser-worker`/autre service : un module
+workspace introuvable. Se rattrape sans reconstruire l'image :
+`docker compose exec <service> sh -c "CI=true pnpm install --frozen-lockfile"` (le `CI=true` évite
+l'invite interactive "recréer les node_modules ?" en shell non interactif) régénère le client
+Prisma et les liens manquants — puis un `docker compose restart <service>` séparé est nécessaire
+dans certains cas : `tsc --watch` ne réinvalide pas une résolution de module déjà en échec
+simplement parce qu'un lien symbolique apparaît sur disque après coup.
+
+**`pnpm turbo run build` sur l'hôte n'est pas le seul à risque — `typecheck`/`lint`/`test` le sont
+tout autant.** `turbo.json` déclare ces quatre tâches avec `"dependsOn": ["^build"]` : lancer
+n'importe laquelle, même filtrée sur un seul service (`--filter=@datarover/api`), reconstruit
+d'abord silencieusement tous ses packages workspace dépendants (`workflow-types`,
+`browser-scripts`, `database`, …) — et leur `build` (`tsup`) commence par **vider** leur `dist/`
+avant de le réécrire. Si un conteneur de dev tourne déjà et dépend de l'un de ces packages, son
+propre `tsc --watch` (qui lit ce même `dist/`, monté en volume) peut traverser cette fenêtre videe
+et mémoriser à tort "module introuvable" — de façon durable : contrairement à une simple
+recompilation, ce cache de résolution ne se corrige pas tout seul au prochain changement de
+fichier, même une fois le vrai `dist/` réécrit correctement juste après. Symptôme : des dizaines
+d'erreurs sur des propriétés/modules qui existent bien, y compris longtemps après la commande hôte
+qui les a déclenchées (le service continue de servir sa dernière compilation réussie jusqu'au
+prochain changement de fichier — le problème peut donc rester invisible pendant des heures).
+Rien à réinstaller dans ce cas, juste `docker compose restart <service>` pour repartir d'une
+compilation fraîche — **par réflexe, après toute commande `pnpm turbo run ...` lancée côté hôte**
+tant qu'un conteneur de dev dépendant du package concerné tourne.
 
 Tout est construit à partir d'un **unique** `Dockerfile`/`Dockerfile.dev` partagé (Specs.md §21) —
 `turbo prune` réduit le monorepo à ce dont chaque service a réellement besoin ; `--target` choisit

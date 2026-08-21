@@ -14,6 +14,7 @@
     "clean": "rimraf dist .turbo"
   },
   "dependencies": {
+    "@datarover/browser-scripts": "workspace:*",
     "@datarover/workflow-types": "workspace:*",
     "@nestjs/common": "^10.4.15",
     "@nestjs/core": "^10.4.15",
@@ -23,7 +24,8 @@
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "zod": "^3.23.8",
-    "playwright-core": "^1.48.0"
+    "playwright-core": "^1.48.0",
+    "@fastify/websocket": "^10.0.1"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.4.9",
@@ -33,6 +35,8 @@
     "@types/node": "^20.14.0",
     "@swc/core": "^1.7.26",
     "dotenv-cli": "^11.0.0",
-    "unplugin-swc": "^1.5.1"
+    "unplugin-swc": "^1.5.1",
+    "ws": "^8.18.0",
+    "@types/ws": "^8.5.13"
   }
 }

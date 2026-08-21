@@ -1,9 +1,10 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useForm, useFieldArray, useWatch, type Control, type UseFormRegister, type Path } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import type { BrowserActionNode, BrowserActionStep, DelaySpec } from "@datarover/workflow-types";
 import { TemplateInput } from "../TemplateInput";
+import { BrowserSessionPreview } from "../BrowserSessionPreview";
 import type { TemplateVariable } from "../../lib/templateVariables";
 
 /** Same flattened-superset-form approach as TextCryptoNodeInspector — see its own doc comment.
@@ -494,6 +495,7 @@ export function BrowserActionNodeInspector({
   // "first successful parse only seeds the ref, doesn't fire onChange" trick unsafe here — that
   // first success might be a real edit, not just the mount-time echo it's meant to filter out.
   const lastSentRef = useRef<string>(JSON.stringify(node));
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
 
   const {
     register,
@@ -549,6 +551,18 @@ export function BrowserActionNodeInspector({
     onChangeRef.current(updated);
   }, [watchedValues]);
 
+  const currentStartUrl = watchedValues.startUrl ?? node.startUrl;
+
+  /** From `BrowserSessionPreview`'s "Valider" — appends every recorded step to the end of the
+   *  list, exactly like clicking "+ ajouter une action" that many times in a row, since a
+   *  recorded step is already a complete, valid `BrowserActionStep` (unlike a freshly appended
+   *  blank row, it never needs `stepToFormValues`' null-safety dance to fill in). */
+  function handleValidateRecording(steps: BrowserActionStep[]): void {
+    for (const step of steps) {
+      stepsArray.append(stepToFormValues(step));
+    }
+  }
+
   return (
     <div className="space-y-4">
       <div>
@@ -570,6 +584,26 @@ export function BrowserActionNodeInspector({
           className="w-full rounded-md border border-gray-300 px-2 py-1.5 font-mono text-sm"
         />
       </div>
+
+      {currentStartUrl.trim().length > 0 && (
+        <div>
+          <button
+            type="button"
+            onClick={() => setIsPreviewOpen(true)}
+            className="w-full rounded-md border border-indigo-300 bg-indigo-50 px-3 py-1.5 text-sm font-medium text-indigo-700 hover:bg-indigo-100"
+          >
+            Aperçu en direct &amp; enregistrement d&apos;actions
+          </button>
+        </div>
+      )}
+
+      {isPreviewOpen && (
+        <BrowserSessionPreview
+          startUrl={currentStartUrl}
+          onClose={() => setIsPreviewOpen(false)}
+          onValidate={handleValidateRecording}
+        />
+      )}
 
       <div>
         <div className="flex items-center justify-between">

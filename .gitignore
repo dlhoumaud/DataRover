@@ -12,6 +12,13 @@ build/
 # Testing
 coverage/
 
+# Stray compiled siblings that can appear under a test/ directory: a non-*.test.ts helper file
+# living outside an app's `src/` (tsconfig's rootDir) can get swept into a running dev
+# container's incremental build (nest start --watch) and emitted right next to its own .ts
+# source instead of into dist/ — harmless (safe to delete), but should never be committed.
+apps/*/test/**/*.js
+apps/*/test/**/*.js.map
+
 # Env
 .env
 .env.local

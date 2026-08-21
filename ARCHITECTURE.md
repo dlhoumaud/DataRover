@@ -1003,13 +1003,287 @@ package partagé modifié pendant qu'un service qui en dépend tourne déjà), p
 `setVariable → stop` exécuté via `curl` confirmant `"reason": "hello world"` (pas le `{{ }}`
 littéral) dans le résultat.
 
+## Itération 10 — Node Navigateur : preview live + enregistreur d'actions (Phases B/C, livrée)
+
+Complète l'itération 9 : la moitié "batch" (Phase A) était livrée, restaient la preview live du
+navigateur piloté et un bouton "Enregistrer" qui capture automatiquement les interactions réelles
+de l'utilisateur comme actions du node — les deux à la demande explicite de l'utilisateur d'origine
+("mets en place le prévisualisateur et l'enregistreur d'actions comme c'était prévu à la base").
+Ceci **lève formellement** l'entrée "WebSocket temps réel" (§17.12) de la section hors périmètre
+ci-dessous, pour ce cas d'usage précis (streaming vidéo + relais d'actions) — pas un transport
+WebSocket générique pour le reste de l'UI (exécutions/logs restent en polling, inchangé).
+
+### Phase B — `candidateSelectors` extrait en module partagé, testé une seule fois
+
+Le bouton "Enregistrer" doit calculer un sélecteur pour l'élément avec lequel l'utilisateur
+interagit — exactement la même logique que `candidateSelectors(el)` de `htmlSandbox.ts` (jusqu'ici
+une chaîne JS dupliquée, injectée dans l'iframe sandboxée de la preview HTML), mais désormais
+nécessaire une seconde fois dans une vraie page pilotée par Playwright. Plutôt que dupliquer une
+seconde copie qui aurait divergé silencieusement avec le temps, nouveau package
+`packages/browser-scripts` : une **unique fonction auto-contenue** (tous les helpers en fonctions
+imbriquées, aucune fermeture externe), testée directement (vitest + jsdom), puis réutilisée aux
+deux endroits en l'injectant via `` `(${candidateSelectors.toString()})` `` — `htmlSandbox.ts`
+remplace son bloc dupliqué par cet appel ; `apps/browser-worker`'s script d'enregistrement (Phase C
+ci-dessous) fait de même. Valide tant que la fonction reste sans fermeture externe : vérifié par un
+test round-trip dédié (`new Function('return (' + fn.toString() + ')')()`) et en inspectant le
+bundle Vite de production réel — la minification renomme la variable englobante mais n'affecte
+jamais le code source que `.toString()` capture, puisque `${fn.toString()}` s'évalue à l'exécution.
+
+### Phase C — transport WebSocket, screencast CDP, enregistreur, preview frontend
+
+- **Transport** : aucune infra WebSocket n'existait dans ce monorepo. Nouvelle dépendance
+  `@fastify/websocket@^10` (compatible fastify v4 déjà en place — la v11 cible fastify v5) sur
+  `apps/browser-worker` **et** `apps/api`, enregistrée via un petit provider (`OnModuleInit`
+  injectant `HttpAdapterHost`, `fastify.register(...)` puis `fastify.get(path, {websocket:true},
+  handler)`) plutôt qu'un décorateur `@nestjs/websockets` — cohérent avec le reste de `tools`, qui
+  utilise déjà des contrôleurs Fastify simples.
+- **`apps/browser-worker` — `GET /session/live`** (`session-live.gateway.ts`) : par connexion,
+  `assertPublicTarget` sur l'URL de départ (même garde-fou SSRF que la Phase A), navigateur
+  **dédié** (même raisonnement d'isolation qu'en Phase A), puis screencast CDP
+  (`Page.startScreencast`/`screencastFrame`/`screencastFrameAck` — choisi plutôt qu'un polling
+  `page.screenshot()` : push, pas de compromis latence/CPU à deviner) relayé en JPEG base64 ; les
+  messages entrants (`mouseMove`/`mouseDown`/`mouseUp`/`wheel`/`keyDown`/`keyUp`) sont rejoués via
+  `page.mouse`/`page.keyboard` (API haut niveau Playwright, pas les commandes CDP `Input.dispatch*`
+  brutes) ; `startRecording`/`stopRecording` activent/désactivent un script d'enregistrement
+  (`recorderScript.ts`, injecté via `page.addInitScript`, ré-armé à chaque navigation puisqu'un
+  clic qui charge une page suit un script par défaut désactivé) qui détecte clic/sélection/frappe
+  (débouncée jusqu'au `blur`) et calcule un sélecteur via `candidateSelectors` (Phase B) — chaque
+  step recomposé est validé côté serveur contre `BrowserActionStepSchema` avant d'être relayé
+  (rejeté et journalisé, jamais fatal, en cas d'échec). Une file d'attente promesse-chaînée
+  (`enqueue`) garantit un traitement strictement FIFO des messages entrants malgré des appels
+  Playwright asynchrones concurrents (rafales de `mousemove`). Nettoyage systématique
+  (`context.close()`, jamais juste `page.close()`) sur `close`/`error` du WS, y compris déconnexion
+  brutale — jamais de session Playwright orpheline.
+- **`apps/api` — relais `GET /tools/session-live`** (`SessionLiveProxyGateway`) : ouvre sa **propre**
+  connexion WS cliente vers `browser-worker` par connexion entrante, relaie dans les deux sens, et
+  **propage le cycle de vie** (fermer un côté ferme explicitement l'autre — pas juste un relais de
+  messages, sinon une session `browser-worker` orpheline persisterait indéfiniment). Garde intact
+  l'invariant existant : le frontend ne parle jamais directement à `browser-worker` (qui reste
+  `expose`-only dans `docker-compose.yml`, jamais `ports`).
+- **Frontend** (`BrowserSessionPreview.tsx`, nouveau) : dessine chaque frame JPEG sur un
+  `<canvas>`, capture pointeur/clavier dessus, convertit les coordonnées canvas → viewport distant
+  réel (`scaleX = canvas.width / rect.width`, etc., puisque la résolution interne du canvas — celle
+  du viewport distant — diffère en général de sa taille affichée). "Enregistrer" bascule
+  `startRecording`/`stopRecording` ; chaque action reçue s'accumule dans une liste locale (même
+  patron "accumuler puis valider" que `PreviewSelector.tsx`) avant fusion dans `node.steps` via
+  `onChange`, une fois "Valider (N actions)" cliqué. Bouton d'ouverture ajouté dans
+  `BrowserActionNodeInspector.tsx`.
+
+**Vérifié** : 9 tests unitaires (`packages/browser-scripts`, jsdom) ; 5 tests e2e
+(`apps/browser-worker/test/session-live.e2e.test.ts`) contre un **vrai Chrome** via un vrai client
+`ws` (streaming de frame, enregistrement d'un clic et d'une frappe débouncée au blur, rejet SSRF,
+erreur avant `start`) — `.inject()` (utilisé par toute autre suite e2e de ce dépôt) ne peut pas
+faire d'upgrade WebSocket, d'où un nouveau helper `test/support/liveApp.ts` avec un vrai
+`app.listen(0)` ; 4 tests e2e (`apps/api/test/session-live.e2e.test.ts`) contre un **faux**
+upstream (`WebSocketServer`) — relais dans les deux sens, message mis en file avant l'ouverture de
+la connexion amont, fermeture propagée dans les deux sens ; 7 tests de composant
+(`BrowserSessionPreview.test.tsx`, WebSocket global mocké) ; un test d'intégration dans
+`BrowserActionNodeInspector.test.tsx` (une action validée depuis la preview atterrit bien dans les
+steps du node). Vérification bout en bout supplémentaire contre la **vraie stack Docker** : client
+`ws` direct sur `ws://localhost:3001/tools/session-live` → chaîne complète api → browser-worker →
+vrai Chrome → `https://example.com`, frame JPEG reçue ; même client contre une cible privée
+(`http://127.0.0.1:3001`) rejeté par le garde-fou SSRF avec le message d'erreur attendu. 590 tests
+Vitest au total dans le monorepo.
+
+### Deux bugs d'environnement Docker trouvés en vérifiant la stack de dev, plus un vrai bug de typage
+
+1. **`nest build`/`nest start --watch` échouaient sur `apps/browser-worker`** (`TS6059`) :
+   `tsconfig.build.json` fixe `rootDir: "src"` mais son `exclude` ne listait que `**/*.test.ts` —
+   le nouveau `test/support/liveApp.ts` (un vrai fichier `.ts`, pas un test) reste donc inclus par
+   le motif par défaut `**/*` tout en étant hors de `rootDir`. `pnpm typecheck` (`tsc --noEmit`,
+   sans `-p`) utilise le `tsconfig.json` de base, sans `rootDir`, donc ne voyait jamais cette
+   erreur — seul `nest build`/`nest start --watch` (qui utilisent `tsconfig.build.json` par
+   convention Nest) la déclenchait. Corrigé en ajoutant `"test"` à l'`exclude` de
+   `tsconfig.build.json` — n'affecte pas la couverture de `pnpm typecheck` sur les fichiers de
+   test, qui passe par l'autre fichier.
+2. **"Connexion perdue avec le service de navigation" en preview**, rapporté par l'utilisateur
+   après plusieurs heures avec les conteneurs de dev déjà démarrés. Cause, en deux temps :
+   le volume anonyme `node_modules` d'`api` n'avait en réalité jamais reçu de client Prisma généré
+   (`node_modules/.prisma/client` absent), et celui de `browser-worker` n'avait pas le lien de
+   workspace vers le tout nouveau `@datarover/browser-scripts` (Phase B) — un écart resté invisible
+   pendant des heures parce que `nest start --watch` continue de servir son dernier build réussi
+   tant qu'aucun changement de fichier ne force une recompilation ; c'est un changement sans
+   rapport (nettoyage d'un `dist/` pendant cette vérification) qui a déclenché la recompilation qui
+   a fait apparaître les deux (`api` : 62 erreurs `PropertyDoesNotExistOnPrismaService` ; `browser-
+   worker` : `@datarover/workflow-types`/`@datarover/browser-scripts` introuvables). Corrigé sans
+   reconstruire l'image : `pnpm install --frozen-lockfile` **à l'intérieur** de chaque conteneur déjà
+   démarré (régénère le client Prisma et les liens de workspace manquants), puis un simple
+   `docker compose restart browser-worker` — nécessaire séparément, parce que `tsc --watch` ne
+   réinvalide pas une résolution de module déjà échouée simplement parce qu'un lien symbolique vient
+   d'apparaître sur disque après coup. Aucune perte de données (volumes nommés Postgres/Redis,
+   jamais concernés par un volume anonyme) : le projet de démonstration créé plus tôt dans la
+   session était toujours présent après coup.
+3. **Un vrai bug de typage trouvé en rejouant `pnpm turbo run build typecheck lint test` en une
+   seule passe combinée** (jamais fait comme telle jusqu'ici pour cette itération, seulement
+   package par package) : `BrowserSessionPreview.test.tsx` indexait `removeButtons[0]` sans garde,
+   invalide sous `noUncheckedIndexedAccess` (actif dans `tsconfig.base.json`) — invisible via
+   `vitest run` seul (les tests passent, esbuild ne type-check pas), seul `tsc --noEmit` le
+   détecte. Corrigé par une assertion non-nulle explicite (`removeButtons[0]!`), le même style déjà
+   utilisé pour ce cas précis dans `packages/workflow-core/src/retry.test.ts`.
+
+### Un vrai bug produit trouvé — la preview restait bloquée sur "Connexion perdue" malgré une session qui fonctionnait
+
+Signalé par l'utilisateur sur un site réel (`chronocarpe.com/fr`) après que les deux incidents
+Docker ci-dessus ont été écartés un par un (conteneurs stables 25 minutes, healthcheck vert, et la
+requête WS confirmée en 101 Switching Protocols dans l'onglet Réseau de Firefox lui-même — donc pas
+un problème serveur). Cause, une fois le serveur mis hors de cause : `apps/web` charge
+`BrowserSessionPreview` sous `React.StrictMode` (`main.tsx`) — en dev, React monte l'effet qui
+ouvre le WebSocket, le nettoie, puis le remonte immédiatement une seconde fois. Le **premier**
+socket se fait fermer par ce cleanup avant que son handshake ait forcément fini de son point de vue
+navigateur, ce qui déclenche un `error`/`close` asynchrone, un peu plus tard, sur cette instance
+déjà abandonnée — exactement les deux messages que Firefox affichait dans sa console. Le
+gestionnaire `error` de ce composant mettait `errorMessage` à jour sans se demander si le socket
+concerné était encore celui de l'effet en cours — et rien ne le réinitialisait ensuite : le
+**second** socket (le vrai, celui qui survit) continuait de recevoir ses frames normalement, mais
+l'UI restait bloquée à vie sur le message d'erreur du premier, jamais nettoyé.
+
+Corrigé par un drapeau `cancelled` capturé par fermeture à chaque invocation de l'effet (pas une
+ref partagée entre invocations) : chacun des quatre gestionnaires d'événements du socket (`open`/
+`message`/`close`/`error`) sort immédiatement si son propre effet a déjà été nettoyé — le patron
+React standard pour ce cas précis de double-montage. Nouveau test
+(`BrowserSessionPreview.test.tsx`) qui rend le composant sous un vrai `<StrictMode>`, confirme bien
+deux instances de socket créées, ouvre/alimente la seconde normalement (`ready`, viewport), puis
+déclenche un `error` tardif sur la première (déjà abandonnée) — et vérifie que "Connexion perdue"
+ne s'affiche jamais. `pnpm turbo run typecheck lint test --filter=@datarover/web` (119/119, +1)
+sans régression. Correctif livré uniquement dans `apps/web` (aucun changement serveur) : visible
+immédiatement via le rechargement à chaud de Vite, sans redémarrage de conteneur.
+
+### Défilement impossible dans la preview + enregistreur trop partiel — étendu à la demande explicite de l'utilisateur
+
+Signalé par l'utilisateur : "on ne peut pas faire défiler les pages" et "il ne prend pas en compte
+tous les événements, frappe clavier, déplacement souris, attente". Deux lacunes réelles,
+distinctes, dans ce qui avait été livré ci-dessus :
+
+- **Molette non relayée** : le protocole (`liveMessages.ts`'s `"wheel"`) et le côté serveur
+  (`page.mouse.wheel`) existaient déjà, mais `BrowserSessionPreview.tsx` n'attachait jamais
+  d'écouteur `wheel` sur le canvas — personne n'envoyait jamais ce message. Corrigé par un
+  écouteur natif (`canvas.addEventListener("wheel", ..., { passive: false })`), pas la prop JSX
+  `onWheel` : React rend ses écouteurs `wheel`/tactiles passifs par défaut, ce qui rend
+  `preventDefault()` silencieusement inopérant — nécessaire ici pour empêcher le défilement
+  d'atterrir sur le propre conteneur (`overflow-auto`) de l'aperçu plutôt que sur la page distante.
+- **Enregistreur limité à clic/sélection/frappe** (`recorderScript.ts`) : il manquait la frappe de
+  touches isolées (Entrée/Tab/Échap/flèches/Origine/Fin/Page haut/Page bas — un `press` en dehors
+  de tout champ texte), le défilement de la page (`scrollPage`, débounced sur `scroll` comme
+  `type` l'est déjà sur `blur`, plutôt qu'un step par tick), et le survol volontaire
+  (`hover`, seulement après un temps de pause au-dessus du seuil `HOVER_DWELL_MS`, jamais sur un
+  simple passage). Ajoutés au script, tous les trois testés contre un vrai Chrome.
+- **Aucun rythme entre actions rejouées** : chaque step réel de l'utilisateur était déjà séparé
+  d'un délai réel (le temps de réflexion, de lecture, …), jamais restitué au rejeu — une séquence
+  produite par l'enregistreur donnait donc des actions instantanées les unes après les autres,
+  contrairement à `moveMouse`/`type`'s propre délai humain (itération 9). Corrigé côté serveur
+  (`SessionLiveGateway.handleRecordedStep`) : un step `wait` est automatiquement inséré devant
+  chaque action recomposée dès que l'écart avec la précédente dépasse `AUTO_WAIT_MIN_MS` (400 ms —
+  sous ce seuil, c'est juste du bruit de latence, pas une vraie pause), plafonné à
+  `AUTO_WAIT_MAX_MS` (15 s — l'utilisateur qui s'est éloigné, pas une pause à rejouer telle
+  quelle). Réinitialisé à chaque `startRecording`, pour que la toute première action d'une session
+  n'hérite jamais d'un délai mesuré depuis un instant qui n'a rien à voir avec le rythme réel de
+  l'utilisateur.
+
+**Un vrai bug trouvé en écrivant les tests de `hover`** : le tout premier jet enregistrait un
+`hover` sur `<body>`/`<html>` chaque fois que le curseur restait simplement immobile n'importe où
+sur la page au-delà du seuil de pause — y compris juste après n'importe quelle autre action, le
+curseur étant *toujours* au repos sur l'un des deux dès qu'il n'est pas sur un élément plus petit.
+Corrigé en excluant explicitement `document.body`/`document.documentElement` de la détection de
+survol — un test dédié (`"never records a 'hover' for resting on the empty page background"`) le
+couvre désormais.
+
+**Un vrai bug trouvé en écrivant le test du rythme automatique** : le `wait` et l'action qu'il
+précède arrivent synchrones, dans le même tick — un enchaînement de `waitForMessage` à usage
+unique (un par étape attendue, motif déjà utilisé partout ailleurs dans ce fichier de test) rate
+le second message : son propre écouteur ne s'enregistre qu'après que le premier `await` se soit
+entièrement résolu via la microtask queue, ce qui arrive *après* que le serveur ait déjà émis (et
+perdu, faute d'auditeur) le second message. Corrigé en remplaçant, pour ce test précis, la
+séquence de `waitForMessage` par un unique auditeur qui accumule tout depuis avant l'envoi de
+Tab — plus de fenêtre de non-écoute entre deux messages consécutifs.
+
+**Vérifié** : `recorderScript.ts`/`session-live.gateway.ts` étendus, 10 tests e2e (5 nouveaux) dans
+`session-live.e2e.test.ts` contre un **vrai Chrome** (press isolé, scroll débounced, hover réel,
+non-hover sur `<body>`, rythme automatique) ; nouveau test de composant pour le relais de la
+molette (`BrowserSessionPreview.test.tsx`, 9 tests). Vérifié en direct contre la vraie stack Docker
+sur `chronocarpe.com/fr` : navigation, molette relayée sans erreur.
+
+Au passage, un troisième piège Docker distinct des trois déjà documentés dans le README a refait
+surface pendant cette vérification (voir README, section Docker) : `typecheck`/`lint`/`test`
+déclenchent, via `turbo.json`'s `"dependsOn": ["^build"]`, la **même** reconstruction des `dist/`
+de packages partagés que `build` lui-même — pas seulement `build`, comme documenté un peu vite la
+première fois que ce piège avait été rencontré plus haut dans cette itération.
+
+### L'enregistreur restait sourd au déplacement de souris et à la plupart des frappes clavier — demandé explicitement par l'utilisateur
+
+Malgré l'extension ci-dessus, l'utilisateur a signalé à nouveau, en termes plus précis : "il manque
+les actions de déplacement de la souris et de frappe au touche du clavier". Ceci renverse
+délibérément une décision de conception initiale de la Phase C ("jamais une trajectoire de pointeur
+brute" — voir le premier jet de `recorderScript.ts`) : l'utilisateur veut le mouvement lui-même
+comme action visible et rejouable, pas seulement son effet final (un clic, un survol).
+
+- **`moveMouse`** : `mousemove` débounced (`MOUSE_MOVE_SETTLE_MS`, 250 ms — plus court que le
+  survol/défilement : un déplacement doit sembler réactif) jusqu'à la position où le curseur se
+  stabilise, plutôt qu'un step par événement natif (des dizaines par seconde pendant un vrai
+  glissement de souris). Aucun `delay` n'est fabriqué à l'enregistrement — le mécanisme de `wait`
+  automatique (ci-dessus) couvre déjà le rythme réel entre deux actions, y compris entre deux
+  `moveMouse`.
+- **Frappe clavier élargie** : les touches spéciales déjà couvertes (`PRESS_KEYS`) restent
+  détectées où qu'elles surviennent ; **toute** autre touche (raccourcis clavier, widgets pilotés
+  au clavier sur un élément non textuel, jeu de touches sur un `<div>`, …) est désormais
+  enregistrée en `press` elle aussi, **sauf** à l'intérieur d'un champ éditable (`INPUT`/
+  `TEXTAREA`/`contenteditable`), où un caractère imprimable reste capturé uniquement par `type` —
+  l'enregistrer une seconde fois en `press` aurait dupliqué la même frappe. Les touches
+  modificatrices seules (Shift/Control/Alt/Meta/…) ne sont jamais enregistrées seules — un `press`
+  d'un modificateur isolé n'a aucun sens à rejouer.
+
+**Vérifié** : 4 nouveaux tests e2e contre un vrai Chrome (`moveMouse` débounced à la position
+finale ; frappe imprimable hors champ texte ; absence de doublon `press` pour une frappe déjà
+couverte par `type` ; le test de survol sur `<body>` étendu pour n'exclure que `hover`, plus
+seulement "aucune action", puisque `moveMouse` y apparaît désormais légitimement) — 13 tests au
+total dans ce fichier, 46/46 pour `apps/browser-worker`. Vérifié en direct contre la vraie stack
+Docker (`ws://localhost:3001/tools/session-live`, un vrai `startRecording` suivi d'un déplacement
+de souris puis d'une frappe "a") : les deux actions attendues, `moveMouse` puis `press`, reçues
+sans erreur.
+
+### Le focus clavier restait sur le node de l'éditeur, pas sur l'aperçu — la frappe n'atteignait jamais la session distante
+
+Signalé par l'utilisateur en deux temps : "il ne detect pas l'action de frappe du clavier" dans un
+champ de saisie, puis, plus alarmant, "quand j'appuie sur backspace il ne supprime pas le caractère
+tapé mais supprime le node". Pas un bug de l'enregistreur (côté `browser-worker`, déjà couvert par
+les tests ci-dessus) mais du **canvas de l'aperçu lui-même** (`BrowserSessionPreview.tsx`) : Firefox
+(contrairement à Chrome/Safari) ne donne pas automatiquement le focus clavier à un élément cliqué
+qui n'est pas un vrai champ de formulaire, même avec `tabIndex={0}`. Le focus restait donc sur le
+node de l'éditeur derrière la fenêtre — chaque frappe, Backspace compris, partait vers React Flow
+plutôt que vers le `onKeyDown` du canvas, déclenchant son raccourci intégré "Backspace supprime le
+node sélectionné" au lieu d'atteindre la session distante.
+
+Corrigé par deux mesures, l'une positive, l'autre défensive : `event.currentTarget.focus()`
+explicite dans `handleMouseDown` (ne pas compter sur le comportement par défaut du navigateur,
+inconsistant selon le navigateur) ; `event.stopPropagation()` en plus de `preventDefault()` dans
+`handleKeyDown`/`handleKeyUp` (`preventDefault()` seul n'empêche pas l'événement de continuer à se
+propager vers un raccourci global situé plus haut dans l'arbre DOM — seul `stopPropagation()` le
+fait). Deux nouveaux tests le couvrent : le focus bascule bien sur le canvas au clic, et un
+"Backspace" envoyé au canvas n'atteint jamais un écouteur `keydown` natif posé sur un ancêtre —
+reproduisant littéralement le raccourci de React Flow. 122/122 tests pour `apps/web`.
+
+### `press` ne se déclenchait toujours pas dans un champ de saisie — le compromis "déjà couvert par `type`" abandonné
+
+Une fois le focus corrigé ci-dessus, l'utilisateur a signalé une dernière fois : "il ne detecte
+toujours pas l'action press quand on est dans un champs input text". Le premier jet de `press`
+excluait délibérément les caractères imprimables **à l'intérieur** d'un champ éditable, au motif
+qu'ils étaient déjà couverts par `type` (voir plus haut) — un compromis qui, du point de vue de
+l'utilisateur, se lisait simplement comme "press ne marche pas dans les champs". Abandonné :
+`press` s'enregistre désormais pour **toute** touche, partout, y compris dans un champ de texte —
+en plus, pas à la place, du `type` agrégé au blur du champ. Seules les touches modificatrices
+seules (Shift/Control/Alt/Meta/…) restent jamais enregistrées seules. Le test qui vérifiait
+l'ancien comportement ("never records a standalone 'press' ... already covered by 'type'") est
+retourné en son contraire exact. 13/13 tests dans `session-live.e2e.test.ts`, vérifié en direct
+contre la vraie stack (une frappe "h" dans une session enregistrée → `{"type":"press","key":"h"}`
+reçu).
+
 ## Explicitement hors périmètre à ce stade
 
-- **WebSocket temps réel** (§17.12) — le moteur émet déjà des événements (`onEvent`) et le worker
-  persiste des `ExecutionLog` au fil de l'exécution ; l'UI actuelle les affiche par polling (1s),
-  pas de relais en direct. Ceci inclut la preview live du node `browserAction` (streaming vidéo +
-  enregistrement des actions de l'utilisateur) : conçue, pas encore livrée (Phase B/C du plan
-  d'itération 9).
+- **WebSocket temps réel pour les exécutions/logs** (§17.12) — le moteur émet déjà des événements
+  (`onEvent`) et le worker persiste des `ExecutionLog` au fil de l'exécution ; l'UI actuelle les
+  affiche toujours par polling (1s), pas de relais en direct. **Levée uniquement pour la preview
+  live du node `browserAction`** (streaming vidéo + enregistrement des actions), livrée en
+  itération 10 — un transport WebSocket dédié à ce cas d'usage précis, pas un relais générique
+  réutilisé pour les exécutions/logs.
 - **Timezone/fenêtres d'exécution/limite de concurrence/priorités pour le scheduler** (§14,
   explicitement listées comme "évolutions futures") — le scheduler livré en itération 7 couvre le
   strict MVP (`manual`/`interval`/`hourly`/`daily`/`weekly`/`cron`), toujours en UTC (le défaut de
@@ -1021,9 +1295,9 @@ littéral) dans le résultat.
   `/session/run` lance son propre navigateur dédié (voir itération 9 ci-dessus), sans limite de
   concurrence globale côté service ; `worker` reste scalable (`--scale worker=3`) mais chaque
   réplique peut solliciter `browser-worker` sans coordination entre elles.
-- **Garde-fou SSRF appliqué à `/render`** — le nouveau garde-fou de l'itération 9 ne protège que les
-  nouvelles routes (`/session/run`, et `/session/live` à venir) ; `/render` (outil de preview,
-  déclenché à la main) reste, comme avant, non protégé — écart identifié, pas corrigé ici.
+- **Garde-fou SSRF appliqué à `/render`** — le garde-fou de l'itération 9 protège `/session/run`
+  et (depuis l'itération 10) `/session/live` ; `/render` (outil de preview, déclenché à la main)
+  reste, comme avant, non protégé — écart identifié, pas corrigé ici.
 - **`WHILE`** (§9.5) — explicitement V2 dans le cahier des charges (§25). `FOR EACH` est livré,
   scopé, en itération 6 (node `loop` — corps intégré, pas de boucle imbriquée, voir plus haut).
 - **Sorties** Webhook/Database/CSV (§9.6) — V2 (§25).
@@ -1044,8 +1318,8 @@ littéral) dans le résultat.
 6. ~~Scheduler exécutable~~ — livré (itération 7).
 7. ~~Docker complet~~ — livré (itération 8).
 8. ~~Node Navigateur (`browserAction`), exécution batch~~ — livré (itération 9, Phase A).
-9. Node Navigateur : preview live (WebSocket + screencast CDP) + enregistrement des actions
-   (itération 9, Phases B/C) — conçu, pas encore livré.
+9. ~~Node Navigateur : preview live (WebSocket + screencast CDP) + enregistrement des actions~~ —
+   livré (itération 10, Phases B/C).
 10. **Coquille Electron**, dans l'esprit de la section 24 (MVP v1) — dernière pièce manquante avant
     ce jalon.
 
@@ -1058,7 +1332,7 @@ docker compose up -d postgres redis     # ou: pnpm infra:up
 pnpm install                             # génère aussi le client Prisma
 pnpm db:migrate                          # première migration (interactif la 1ère fois : --name init)
 pnpm build
-pnpm test        # 443 tests Vitest (unitaires + intégration moteur + e2e api/worker sur vrai Postgres/Redis)
+pnpm test        # 600 tests Vitest (unitaires + intégration moteur + e2e api/worker sur vrai Postgres/Redis)
 pnpm lint
 pnpm typecheck
 

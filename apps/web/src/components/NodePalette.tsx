@@ -4,9 +4,9 @@ import { NODE_COLORS } from "../lib/nodeStyles";
 const NODE_TYPE_BUTTONS: ReadonlyArray<{ type: ActionNode["type"]; label: string }> = [
   { type: "http", label: "HTTP" },
   { type: "browserAction", label: "Navigateur" },
+  { type: "extract", label: "Extraction" },
   { type: "condition", label: "Condition" },
   { type: "loop", label: "Boucle" },
-  { type: "extract", label: "Extraction" },
   { type: "setVariable", label: "Variables" },
   { type: "dataTransform", label: "Traitement" },
   { type: "textCrypto", label: "Crypto / Encodage" },
