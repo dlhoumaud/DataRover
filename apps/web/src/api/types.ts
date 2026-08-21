@@ -4,6 +4,7 @@ import type {
   ExtractOutputType,
   ExtractSourceType,
   HttpMethod,
+  ScheduleType,
   WorkflowDefinition,
 } from "@datarover/workflow-types";
 
@@ -148,4 +149,28 @@ export interface TestSelectorResultDto {
   value: unknown;
   matchedSelector?: string;
   selectorScores: SelectorScoreDto[];
+}
+
+/**
+ * DTOs for the scheduler (Specs.md §14), backed by
+ * POST/GET /workflows/:workflowId/schedules and PATCH/DELETE /schedules/:id — see
+ * src/api/schedules.ts.
+ */
+
+export interface ScheduleDto {
+  id: string;
+  workflowId: string;
+  type: ScheduleType;
+  everyMinutes: number | null;
+  cronExpression: string | null;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateScheduleInput {
+  type: ScheduleType;
+  everyMinutes?: number;
+  cronExpression?: string;
+  enabled?: boolean;
 }

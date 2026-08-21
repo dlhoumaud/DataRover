@@ -10,6 +10,8 @@ import {
   type TextCryptoNode,
   type TextCryptoOperation,
 } from "@datarover/workflow-types";
+import { TemplateInput } from "../TemplateInput";
+import type { TemplateVariable } from "../../lib/templateVariables";
 
 /** Same "all fields optional, reshaped on save" approach as TextTransformNodeInspector — see its
  *  doc comment. `algorithm` (hash) and `cipherAlgorithm` (encrypt/decrypt) are separate fields —
@@ -269,9 +271,13 @@ function OperationRow({
 export function TextCryptoNodeInspector({
   node,
   onChange,
+  variables = [],
 }: {
   node: TextCryptoNode;
   onChange: (updated: TextCryptoNode) => void;
+  /** `{{ }}` autocomplete entries for "Texte source" — see TemplateInput. Optional (default
+   *  `[]`) so LoopNodeInspector's embedded-body usage doesn't need updating at the same time. */
+  variables?: TemplateVariable[];
 }): JSX.Element {
   const nodeRef = useRef(node);
   nodeRef.current = node;
@@ -336,8 +342,9 @@ export function TextCryptoNodeInspector({
 
       <div>
         <label className="block text-sm font-medium text-gray-700">Texte source</label>
-        <input
-          {...register("input")}
+        <TemplateInput
+          registration={register("input")}
+          variables={variables}
           placeholder="{{ actions.extract1.output.id }}"
           className="mt-1 w-full rounded-md border border-gray-300 px-2 py-1.5 font-mono text-sm"
         />

@@ -1,0 +1,9 @@
+# Keeps the build context small and fast — none of this is needed inside the image: `pnpm
+# install` (re)installs dependencies from scratch in every stage, and `dist`/`.turbo` are build
+# outputs/caches the image rebuilds itself anyway.
+**/node_modules
+**/dist
+**/.turbo
+.git
+.env
+*.log

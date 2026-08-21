@@ -3,6 +3,8 @@ import { useForm, useFieldArray, useWatch, type Path } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { SetVariableNodeSchema, type SetVariableNode } from "@datarover/workflow-types";
+import { TemplateInput } from "../TemplateInput";
+import type { TemplateVariable } from "../../lib/templateVariables";
 
 /**
  * Form schema derived from `SetVariableNodeSchema`: `variables` (domain:
@@ -38,9 +40,14 @@ function pairsToRecord(pairs: Array<{ key: string; value: string }>): Record<str
 export function SetVariableNodeInspector({
   node,
   onChange,
+  variables = [],
 }: {
   node: SetVariableNode;
   onChange: (updated: SetVariableNode) => void;
+  /** `{{ }}` autocomplete entries for each variable's value field — see TemplateInput. Optional
+   *  (default `[]`) so LoopNodeInspector's embedded-body usage doesn't need updating at the same
+   *  time. */
+  variables?: TemplateVariable[];
 }): JSX.Element {
   const nodeRef = useRef(node);
   nodeRef.current = node;
@@ -116,10 +123,12 @@ export function SetVariableNodeInspector({
                 placeholder="Nom de variable"
                 className="w-1/3 rounded-md border border-gray-300 px-2 py-1 font-mono text-sm"
               />
-              <input
-                {...register(`variables.${index}.value` as Path<SetVariableFormValues>)}
+              <TemplateInput
+                registration={register(`variables.${index}.value` as Path<SetVariableFormValues>)}
+                variables={variables}
                 placeholder="{{ actions.http1.output.title }}"
-                className="flex-1 rounded-md border border-gray-300 px-2 py-1 font-mono text-sm"
+                wrapperClassName="flex-1"
+                className="w-full rounded-md border border-gray-300 px-2 py-1 font-mono text-sm"
               />
               <button
                 type="button"

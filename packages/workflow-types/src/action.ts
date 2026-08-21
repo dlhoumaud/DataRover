@@ -287,6 +287,9 @@ export type TextCryptoNode = z.infer<typeof TextCryptoNodeSchema>;
  *   "break the loop" mean; neither is supported in this iteration.
  * - `loop`: no nested loops in this iteration — keeps the embedded-body model (see below) from
  *   needing its own recursive UI/validation story.
+ * - `browserAction`: whether a browser session should be shared or relaunched across iterations
+ *   is a real design question of its own, deliberately left for a later iteration rather than
+ *   decided implicitly by wiring it in here.
  */
 export const LoopBodyNodeSchema = z.discriminatedUnion("type", [
   HttpNodeSchema,
@@ -328,6 +331,86 @@ export const LoopNodeSchema = BaseNodeSchema.extend({
 });
 export type LoopNode = z.infer<typeof LoopNodeSchema>;
 
+/**
+ * An optional pause used by several `browserAction` steps below to simulate human timing
+ * variation: either a fixed pause (`"fixed"`), or a fresh random duration drawn from
+ * `[minMs, maxMs]` **every time the step runs** (`"random"`) — e.g. so replaying the same
+ * `moveMouseRandom` step twice doesn't pause for the exact same duration both times, the way a
+ * real human never does. `undefined` (the field is optional wherever it's used) means no pause at
+ * all, not "instant" as a distinct choice.
+ */
+export const DelaySpecSchema = z
+  .discriminatedUnion("kind", [
+    z.object({ kind: z.literal("fixed"), ms: z.number().int().min(0) }),
+    z.object({ kind: z.literal("random"), minMs: z.number().int().min(0), maxMs: z.number().int().min(0) }),
+  ])
+  .refine((delay) => delay.kind !== "random" || delay.maxMs >= delay.minMs, {
+    message: "maxMs must be greater than or equal to minMs",
+  });
+export type DelaySpec = z.infer<typeof DelaySpecSchema>;
+
+/**
+ * A single step of a `browserAction` sequence, replayed in order by a real Playwright-driven
+ * browser (see `browserActionExecutor.ts` / `apps/browser-worker`'s `/session/run`). Every string
+ * field is interpolated the same way `HttpNode.url`/`body` are — see `httpExecutor.ts`.
+ */
+export const BrowserActionStepSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("navigate"), url: z.string() }),
+  z.object({ type: z.literal("click"), selector: z.string() }),
+  /**
+   * Types character by character (`page.type` / `locator.pressSequentially`) — NEVER
+   * `page.fill`, which sets the value directly without dispatching real keyboard events. That
+   * distinction is the entire reason this node exists instead of just using `http`: don't
+   * "optimize" this to `fill`. `delay` (optional) paces the keystrokes — a `"random"` delay here
+   * is what actually produces a human-like typing cadence rather than a perfectly even one.
+   */
+  z.object({ type: z.literal("type"), selector: z.string(), text: z.string(), delay: DelaySpecSchema.optional() }),
+  /** A single key press — "Enter", "Tab", "Escape", … (Playwright key names). */
+  z.object({ type: z.literal("press"), key: z.string() }),
+  z.object({ type: z.literal("select"), selector: z.string(), value: z.string() }),
+  /** A real, intentional mouse hover — e.g. to open a hover-triggered menu. */
+  z.object({ type: z.literal("hover"), selector: z.string() }),
+  z.object({ type: z.literal("dragTo"), sourceSelector: z.string(), targetSelector: z.string() }),
+  z.object({ type: z.literal("scrollIntoView"), selector: z.string() }),
+  z.object({ type: z.literal("scrollPage"), x: z.number().default(0), y: z.number() }),
+  /** Moves the mouse to an absolute `(x, y)` position of the current viewport — not tied to any
+   *  element/selector. `delay` (optional) is a pause taken right after the move settles, to
+   *  simulate the brief hesitation a real pointer has before the next action. */
+  z.object({ type: z.literal("moveMouse"), x: z.number(), y: z.number(), delay: DelaySpecSchema.optional() }),
+  /** Moves the mouse to a random point within the current viewport — idle human-like jitter, not
+   *  aimed at any particular element. Same `delay` semantics as `moveMouse`. */
+  z.object({ type: z.literal("moveMouseRandom"), delay: DelaySpecSchema.optional() }),
+  z.object({ type: z.literal("wait"), ms: z.number().int().positive() }),
+  z.object({ type: z.literal("waitForSelector"), selector: z.string() }),
+]);
+export type BrowserActionStep = z.infer<typeof BrowserActionStepSchema>;
+
+/**
+ * Drives a real, Playwright-controlled browser through an ordered sequence of interactive
+ * `steps` starting at `startUrl`, then returns the final page HTML once it has fully finished
+ * loading (JS included) — see `apps/browser-worker`'s `/session/run`. Unlike `http`, this node
+ * can simulate mouse movement, hovering, and real keystroke-level typing, for sites that only
+ * reveal their real content in response to genuine interaction.
+ *
+ * `retryPolicy` is deliberately OMITTED from this schema (not just left unset): the engine wraps
+ * every executor call in `withRetry`, and a retry here would replay the *entire* step sequence
+ * from the start — including any already-succeeded submit click, for instance. `.strict()` makes
+ * that omission actually enforced rather than cosmetic: plain `z.object.omit()` only removes a
+ * key from the shape zod *parses into* — by default it still silently strips (rather than
+ * rejects) any other unrecognized key passed at runtime, which would let a stray `retryPolicy`
+ * on the input object through unnoticed. `.strict()` turns that into a hard validation error, so
+ * this can never be silently configured through the union, rather than merely documented as a
+ * footgun in the inspector UI.
+ */
+export const BrowserActionNodeSchema = BaseNodeSchema.omit({ retryPolicy: true })
+  .extend({
+    type: z.literal("browserAction"),
+    startUrl: z.string(),
+    steps: z.array(BrowserActionStepSchema).min(1),
+  })
+  .strict();
+export type BrowserActionNode = z.infer<typeof BrowserActionNodeSchema>;
+
 export const ActionNodeSchema = z.discriminatedUnion("type", [
   HttpNodeSchema,
   ExtractNodeSchema,
@@ -337,6 +420,7 @@ export const ActionNodeSchema = z.discriminatedUnion("type", [
   DataTransformNodeSchema,
   TextCryptoNodeSchema,
   LoopNodeSchema,
+  BrowserActionNodeSchema,
 ]);
 export type ActionNode = z.infer<typeof ActionNodeSchema>;
 

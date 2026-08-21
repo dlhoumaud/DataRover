@@ -1,0 +1,42 @@
+{
+  "name": "@datarover/browser-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DataRover browser-rendering microservice — drives a real headless Chrome/Chromium via playwright-core, isolated from apps/api and apps/worker so a heavy/stuck render can never affect either (Specs.md §19-20: \"browser-worker\" must be a separate service from the HTTP worker).",
+  "scripts": {
+    "build": "nest build",
+    "start": "dotenv -e ../../.env -- node dist/main.js",
+    "dev": "dotenv -e ../../.env -- nest start --watch",
+    "test": "dotenv -e ../../.env -- vitest run",
+    "test:watch": "dotenv -e ../../.env -- vitest",
+    "lint": "eslint src",
+    "typecheck": "tsc --noEmit",
+    "clean": "rimraf dist .turbo"
+  },
+  "dependencies": {
+    "@datarover/browser-scripts": "workspace:*",
+    "@datarover/workflow-types": "workspace:*",
+    "@nestjs/common": "^10.4.15",
+    "@nestjs/core": "^10.4.15",
+    "@nestjs/platform-fastify": "^10.4.15",
+    "@nestjs/config": "^3.3.0",
+    "fastify": "^4.28.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "zod": "^3.23.8",
+    "playwright-core": "^1.48.0",
+    "@fastify/websocket": "^10.0.1"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^10.4.9",
+    "@nestjs/testing": "^10.4.15",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5",
+    "@types/node": "^20.14.0",
+    "@swc/core": "^1.7.26",
+    "dotenv-cli": "^11.0.0",
+    "unplugin-swc": "^1.5.1",
+    "ws": "^8.18.0",
+    "@types/ws": "^8.5.13"
+  }
+}

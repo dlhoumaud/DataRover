@@ -11,6 +11,14 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: Number(process.env.WEB_PORT ?? 5173),
+    // Listen on every interface, not just localhost — harmless for plain `pnpm dev` on the host,
+    // but required for the dev server to be reachable at all from outside a Docker container
+    // (docker-compose.dev.yml's "web" service).
+    host: true,
+  },
+  preview: {
+    port: Number(process.env.WEB_PORT ?? 5173),
+    host: true,
   },
   test: {
     environment: "jsdom",

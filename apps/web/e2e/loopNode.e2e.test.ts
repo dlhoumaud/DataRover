@@ -86,8 +86,11 @@ describe("Loop node", () => {
     await loopNode.click();
 
     // 4. Point "source" at the project's global array.
+    // `following-sibling::div//input`, not `following-sibling::input` — TemplateInput ({{ }}
+    // autocomplete) wraps its <input> in a `<div>`, so the field is now the label's sibling's
+    // descendant, not a direct sibling itself.
     const sourceInput = await driver.wait(
-      until.elementLocated(By.xpath("//label[contains(.,'Source')]/following-sibling::input")),
+      until.elementLocated(By.xpath("//label[contains(.,'Source')]/following-sibling::div//input")),
       TIMEOUT,
     );
     await sourceInput.clear();
@@ -139,7 +142,7 @@ describe("Loop node", () => {
     await reloadedLoopNode.click();
 
     const reloadedSourceInput = await driver.wait(
-      until.elementLocated(By.xpath("//label[contains(.,'Source')]/following-sibling::input")),
+      until.elementLocated(By.xpath("//label[contains(.,'Source')]/following-sibling::div//input")),
       TIMEOUT,
     );
     expect(await reloadedSourceInput.getAttribute("value")).toBe("{{ global.items }}");

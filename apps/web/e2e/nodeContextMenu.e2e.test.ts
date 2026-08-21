@@ -5,7 +5,7 @@
  * conventions as workflow.e2e.test.ts — see README.md "Tests e2e navigateur".
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { Builder, By, until, type WebDriver } from "selenium-webdriver";
+import { Builder, By, Key, until, type WebDriver } from "selenium-webdriver";
 import firefox from "selenium-webdriver/firefox";
 import { API_URL, WEB_URL, assertReachable } from "./support/env";
 import { resolveFirefoxBinary } from "./support/firefox";
@@ -112,10 +112,34 @@ describe("node palette colors, new node types, and the node context menu", () =>
     const menuItemTexts = await Promise.all(
       (await menu.findElements(By.css('[role="menuitem"]'))).map((el) => el.getText()),
     );
-    expect(menuItemTexts).toEqual(["Dupliquer", "Supprimer"]);
+    // The freshly-added HTTP node isn't the workflow's start node yet (a brand-new workflow
+    // starts as a lone "stop1" node — see ProjectDetailPage's handleCreateWorkflow), hence the
+    // clickable "Définir comme nœud de départ" rather than the disabled "✓ Nœud de départ" state.
+    expect(menuItemTexts).toEqual(["Définir comme nœud de départ", "Dupliquer", "Supprimer"]);
 
+    // 5b. Designating a node as the start renders its "▶ Départ" badge, and re-opening the menu
+    // on that same node now shows the disabled "✓ Nœud de départ" state instead — the regression
+    // this covers: a node wired upstream of the workflow's start was silently never executed
+    // (nothing marked which node execution actually begins at, and nothing let the user change it).
+    await menu.findElement(By.xpath(".//button[contains(.,'Définir comme nœud de départ')]")).click();
+    await driver.wait(until.elementLocated(By.xpath("//*[contains(text(),'▶ Départ')]")), TIMEOUT);
+
+    await driver.actions({ async: true }).contextClick(httpNode).perform();
+    const menuAfterSetStart = await driver.wait(until.elementLocated(By.css('[role="menu"]')), TIMEOUT);
+    const menuItemTextsAfterSetStart = await Promise.all(
+      (await menuAfterSetStart.findElements(By.css('[role="menuitem"]'))).map((el) => el.getText()),
+    );
+    expect(menuItemTextsAfterSetStart).toEqual(["✓ Nœud de départ", "Dupliquer", "Supprimer"]);
+    await driver.actions({ async: true }).sendKeys(Key.ESCAPE).perform();
+    await driver.wait(async () => (await driver.findElements(By.css('[role="menu"]'))).length === 0, TIMEOUT);
+
+    // Fresh menu reference — the earlier `menu`/`menuAfterSetStart` elements are gone from the
+    // DOM by now (each closed after its own action), and a stale Selenium element reference
+    // throws rather than silently re-locating itself.
     const nodesBeforeDuplicate = (await driver.findElements(By.css(".react-flow__node"))).length;
-    await menu.findElement(By.xpath(".//button[contains(.,'Dupliquer')]")).click();
+    await driver.actions({ async: true }).contextClick(httpNode).perform();
+    const menuForDuplicate = await driver.wait(until.elementLocated(By.css('[role="menu"]')), TIMEOUT);
+    await menuForDuplicate.findElement(By.xpath(".//button[contains(.,'Dupliquer')]")).click();
     await driver.wait(async () => {
       const nodes = await driver.findElements(By.css(".react-flow__node"));
       return nodes.length === nodesBeforeDuplicate + 1;

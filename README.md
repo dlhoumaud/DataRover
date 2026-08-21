@@ -12,20 +12,33 @@ réel d'avancement (ce qui est implémenté vs le reste de la vision) est docume
 
 ## État actuel
 
-Cinq itérations livrées : le **moteur de workflow** (packages TypeScript purs), un **backend
+Dix itérations livrées : le **moteur de workflow** (packages TypeScript purs), un **backend
 exécutable** (API NestJS + PostgreSQL + worker BullMQ), une **UI React** (éditeur visuel React
-Flow, **plein écran**) branchée dessus, l'outil de **preview HTML + sélection visuelle
-d'éléments** (cliquer un élément dans un aperçu sandboxé de la page cible, avec rendu JavaScript
-optionnel pour les pages React/Vue, pour générer un node d'extraction), et des **nodes de
-traitement de données** (`dataTransform`, affiché "Traitement" — entrée brute/JSON/YAML/XML,
-sortie texte/liste/tableau/entier/décimal/booléen déduite automatiquement de la dernière opération
-— lower/upper/replace/regex/slice/trim/pad en mode brut, getPath (JSONPath)/keys/values/stringify
-en mode structuré ; `textCrypto` : hash — md5 à sha3-512, ripemd160, blake2 —, encodage —
-base64/hex/URL/charsets —, chiffrement symétrique — AES/3DES/chacha20-poly1305 — et RSA
-asymétrique) avec palette colorée et menu contextuel (dupliquer/supprimer) dans l'éditeur. Pas
-encore de scheduler exécutable, de
-Docker complet ni d'Electron (voir
-[`ARCHITECTURE.md`](./ARCHITECTURE.md) pour le détail et la feuille de route).
+Flow, **plein écran**, panneau d'inspection redimensionnable) branchée dessus, l'outil de
+**preview HTML/JSON/XML + sélection visuelle d'éléments** (cliquer un élément dans un aperçu
+sandboxé — ou un nœud dans un arbre JSON/XML colorisé et repliable — avec rendu JavaScript
+optionnel pour les pages React/Vue, pour générer un node d'extraction), des **nodes de traitement
+de données** (`dataTransform`, affiché "Traitement" — entrée brute/JSON/YAML/XML, sortie
+texte/liste/tableau/entier/décimal/booléen déduite automatiquement de la dernière opération ;
+`textCrypto` : hash/encodage/chiffrement symétrique et RSA) et de **boucle** (`loop`, corps
+intégré, itère sur une liste/un tableau), un **scheduler exécutable** (déclenchement récurrent
+manuel/intervalle/horaire/quotidien/hebdomadaire/cron, via BullMQ), un **environnement Docker
+complet** (`docker compose up --build` démarre `web`/`api`/`worker`/`browser-worker` — le rendu
+JavaScript isolé dans son propre service — `postgres`/`redis`, migrations comprises), et un node
+**"Navigateur"** (`browserAction`) qui simule une vraie interaction utilisateur (clic, frappe
+clavier caractère par caractère, survol, glisser-déposer, déplacement de souris vers une position
+précise ou aléatoire) via un vrai navigateur Playwright piloté par `browser-worker` — avec, pour la
+frappe et les déplacements de souris, un délai optionnel **fixe ou aléatoire** (min–max, tiré à
+nouveau à chaque exécution) pour simuler un temps de réaction humain plutôt qu'une cadence
+parfaitement régulière. Ce node dispose aussi d'une **preview live avec enregistreur d'actions** :
+un bouton dans son inspecteur ouvre un aperçu du navigateur en direct (streaming vidéo via
+screencast CDP), pilotable à la souris/au clavier depuis le navigateur de l'utilisateur, avec un
+bouton "Enregistrer" qui détecte clic/sélection/frappe et les propose comme actions à ajouter au
+node. Le panneau d'inspection affiche désormais, pour tout node, ses **variables de sortie**
+(`{{ actions.http1.output.status }}`, etc., un clic pour copier), et chaque champ `{{ }}` de
+l'éditeur propose une **autocomplétion** de ces variables (et des variables globales du projet) dès
+qu'on tape `{{`. Reste **Electron** (voir [`ARCHITECTURE.md`](./ARCHITECTURE.md) pour le détail et
+la feuille de route).
 
 ```text
 packages/
@@ -34,12 +47,15 @@ packages/
 ├── expression-engine    interpolation {{ }} + évaluateur d'expressions contrôlé
 ├── extractor            extraction CSS / JSONPath / XML / Regex
 ├── workflow-core        le moteur d'exécution de workflow
+├── browser-scripts      fonctions de calcul de sélecteur partagées preview iframe ↔ enregistreur
 ├── database             schéma Prisma + client partagé (Project/Workflow/Execution/...)
 └── queue                contrat partagé API↔worker pour la file BullMQ
 
 apps/
-├── api                  API NestJS (Fastify) : projets, workflows, exécutions, health
+├── api                  API NestJS (Fastify) : projets, workflows, exécutions, health, scheduler
 ├── worker               consomme la queue, exécute le moteur, persiste le résultat
+├── browser-worker       rendu JavaScript (Playwright) — preview (appelé par l'API) et node
+│                        "Navigateur" (appelé directement par le worker)
 └── web                  UI React (Vite + React Flow) : éditeur visuel, exécution, suivi
 
 examples/
@@ -50,14 +66,16 @@ examples/
 
 - Node.js ≥ 20 (voir `.nvmrc`)
 - pnpm ≥ 9 (via Corepack)
-- Docker (pour PostgreSQL + Redis en local — `docker-compose.yml`)
+- Docker (pour PostgreSQL + Redis en local en mode développement — `docker-compose.yml` — ou pour
+  l'environnement Docker complet, voir [Docker](#docker) plus bas)
 - Un vrai Firefox installé (pour `pnpm test:e2e`, voir "Tests e2e navigateur" plus bas)
-- Optionnel — Google Chrome ou Chromium installé, pour l'option "Rendu JavaScript" de l'outil de
-  preview HTML (`apps/api/src/tools/browser-renderer.service.ts`) : nécessaire uniquement pour
-  prévisualiser des pages dont le contenu réel n'existe qu'après exécution du JS côté client (une
-  SPA React/Vue/etc.) ; sans Chrome installé, tout le reste de l'app fonctionne normalement, seule
-  cette case à cocher renvoie une erreur explicite si on l'active. Chemin détecté automatiquement
-  (`/usr/bin/google-chrome`, etc.) ou fourni via `CHROME_EXECUTABLE_PATH`.
+- Optionnel en développement local (fourni automatiquement dans l'image Docker de
+  `apps/browser-worker`) — Google Chrome ou Chromium installé, pour l'option "Rendu JavaScript" de
+  l'outil de preview HTML (`apps/browser-worker/src/render/render.service.ts`) : nécessaire
+  uniquement pour prévisualiser des pages dont le contenu réel n'existe qu'après exécution du JS
+  côté client (une SPA React/Vue/etc.) ; sans Chrome installé, tout le reste de l'app fonctionne
+  normalement, seule cette case à cocher renvoie une erreur explicite si on l'active. Chemin
+  détecté automatiquement (`/usr/bin/google-chrome`, etc.) ou fourni via `CHROME_EXECUTABLE_PATH`.
 
 ```bash
 corepack enable
@@ -111,20 +129,22 @@ Prérequis : Postgres/Redis démarrés (`pnpm infra:up`) et `.env` renseigné.
 pnpm dev
 ```
 
-Lance **en parallèle**, avec rechargement à chaud, les trois apps (via le pipeline `dev` de
+Lance **en parallèle**, avec rechargement à chaud, les quatre apps (via le pipeline `dev` de
 Turborepo, persistant) :
 
 | App | Commande sous-jacente | Adresse |
 |---|---|---|
 | `apps/api` | `nest start --watch` | http://localhost:3001 (`$API_PORT`) |
 | `apps/worker` | `tsx watch src/main.ts` | — (aucun port, consomme la queue) |
+| `apps/browser-worker` | `nest start --watch` | http://localhost:3002 (`$BROWSER_WORKER_PORT`) — appelé uniquement par `apps/api`, jamais par le navigateur |
 | `apps/web` | `vite` | http://localhost:5173 (`$WEB_PORT`) |
 
-Pour lancer une seule app en développement (utile pour ne pas noyer les logs des deux autres) :
+Pour lancer une seule app en développement (utile pour ne pas noyer les logs des autres) :
 
 ```bash
 pnpm --filter @datarover/api dev
 pnpm --filter @datarover/worker dev
+pnpm --filter @datarover/browser-worker dev
 pnpm --filter @datarover/web dev
 ```
 
@@ -142,45 +162,133 @@ pnpm --filter @datarover/example-product-monitor start
 pnpm build   # build tous les packages/apps (tsup pour les packages, nest build / vite build pour les apps)
 ```
 
-Puis, en trois process séparés (l'API n'exécute **jamais** le moteur elle-même — voir
+Puis, en quatre process séparés (l'API n'exécute **jamais** le moteur elle-même — voir
 l'itération 2 dans [`ARCHITECTURE.md`](./ARCHITECTURE.md)) :
 
 ```bash
-node apps/api/dist/main.js       # API — écoute sur $API_PORT (3001 par défaut)
-node apps/worker/dist/main.js    # Worker — consomme la queue BullMQ et exécute les workflows
+node apps/api/dist/main.js             # API — écoute sur $API_PORT (3001 par défaut)
+node apps/worker/dist/main.js          # Worker — consomme la queue BullMQ et exécute les workflows
+node apps/browser-worker/dist/main.js  # Rendu JavaScript pour l'outil de preview (appelé par l'API)
 pnpm --filter @datarover/web preview   # sert le build statique de l'UI (vérification locale)
 ```
 
 `vite preview` sert `apps/web/dist` localement pour vérifier un build de production — ce n'est pas
-un serveur web de production (pas de compression/cache/TLS). Le déploiement réel de ce dossier
-statique derrière un vrai serveur/CDN fait partie de l'itération "Docker complet" à venir (voir
-feuille de route dans `ARCHITECTURE.md`).
+un serveur web de production (pas de compression/cache/TLS) ; **l'environnement Docker complet**
+(voir [Docker](#docker) ci-dessous) sert ce même dossier via un vrai nginx et couvre les quatre
+process ci-dessus en une seule commande — c'est la voie recommandée pour un déploiement réel.
 
 Variables d'environnement à définir en production : voir [`.env.example`](./.env.example)
 (`DATABASE_URL`, `REDIS_HOST`/`REDIS_PORT`, `API_PORT`, `WEB_ORIGIN`, `WORKER_CONCURRENCY`,
-`VITE_API_URL` — cette dernière doit pointer vers l'URL publique de l'API et être fournie **au
-moment du build** de `apps/web`, Vite l'inline dans le bundle statique).
+`BROWSER_WORKER_PORT`/`BROWSER_WORKER_URL`, `VITE_API_URL` — cette dernière doit pointer vers
+l'URL publique de l'API et être fournie **au moment du build** de `apps/web`, Vite l'inline dans le
+bundle statique).
 
 ---
 
 ## Docker
 
-Le dépôt fournit un `docker-compose.yml` **minimal** : uniquement les dépendances avec état
-(PostgreSQL, Redis), pas encore la containerisation complète de `web`/`api`/`worker` décrite au
-§19-21 du cahier des charges (c'est un point de la feuille de route, voir `ARCHITECTURE.md`).
+Environnement complet (Specs.md §19-21) : `web`, `api`, `worker`, `browser-worker` (rendu
+JavaScript de l'outil de preview, isolé dans son propre service — voir `ARCHITECTURE.md`,
+itération 8), `postgres`, `redis` — tout sur un seul réseau Docker, migrations comprises (le
+service `migrate` s'exécute une fois puis s'arrête, `api`/`worker` attendent sa réussite avant de
+démarrer).
 
 ```bash
-docker compose up -d          # démarre postgres + redis (équivalent à pnpm infra:up)
-docker compose ps             # vérifier que les deux services sont "healthy"
-docker compose logs -f postgres redis   # suivre les logs
+cp .env.example .env
+docker compose up --build     # web (http://localhost:5173), api (http://localhost:3001), ...
+docker compose ps             # api/browser-worker doivent apparaître "healthy"
+docker compose logs -f api worker browser-worker
 docker compose down           # arrête les conteneurs (conserve les volumes/données)
 docker compose down -v        # arrête ET supprime les volumes (repart d'une base vide)
+docker compose up -d --scale worker=3   # plusieurs workers (Specs.md §20 — scalable horizontalement)
 ```
 
-Les identifiants/ports sont configurables via `.env` (`POSTGRES_*`, `REDIS_*`) — voir
-[`.env.example`](./.env.example). Une fois les conteneurs up, suis la section
-[Mode développement](#mode-développement) ou [Mode production](#mode-production) ci-dessus pour
-lancer l'API/le worker/l'UI (en local, hors Docker, pour cette itération).
+Mode développement (hot reload nest/tsx/vite, dépôt monté en volume — modifier un fichier sur
+l'hôte se répercute immédiatement dans le conteneur) :
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+```
+
+**Les deux `-f` sont obligatoires à chaque fois** — `docker compose up` seul (ou avec un seul
+`-f docker-compose.yml`) démarre les images de **production** : pas de montage du dépôt en volume,
+donc aucun changement de fichier ne sera jamais visible, peu importe combien de fois on relance ou
+reconstruit. C'est la cause la plus fréquente de "je ne vois pas mes changements" : vérifier
+`docker compose ps` — en mode dev, la commande de chaque conteneur `api`/`worker`/`browser-
+worker`/`web` doit apparaître comme `pnpm --filter ... dev` (nest/tsx/vite en mode watch), jamais
+`node dist/main.js`.
+
+Une fois les conteneurs de dev démarrés, éditer un fichier `.ts`/`.tsx` source suffit — nest/tsx/vite
+en mode watch le détectent immédiatement à l'intérieur du conteneur, **sans jamais relancer
+`docker compose up`**. `--build` (ou `--force-recreate`) n'est nécessaire que pour reconstruire
+l'image elle-même, dans deux cas précis :
+- la première fois (l'image n'existe pas encore) ;
+- après avoir modifié un `package.json` ou `pnpm-lock.yaml` (nouvelle dépendance, ajout d'un
+  package workspace, etc.) — `Dockerfile.dev` exécute `pnpm install` une seule fois, **au moment de
+  la construction de l'image**, puis `docker-compose.dev.yml` masque le `node_modules` du montage
+  par un volume anonyme qui garde ce `node_modules` figé entre deux redémarrages (voir le
+  commentaire d'en-tête de `Dockerfile.dev`) : le dépôt source est bien monté en direct, mais pas
+  `node_modules` — un `pnpm install` fait seulement sur l'hôte, ou un fichier ajouté dans un
+  workspace pas encore connu du `node_modules` de l'image, ne sera invisible depuis le conteneur
+  qu'après un nouveau `--build`.
+
+**Un troisième cas, différent des deux ci-dessus, nécessite non pas un `--build` mais un simple
+`docker compose restart <service>`** : modifier un package **partagé** (`packages/workflow-types`,
+`packages/workflow-core`, …) pendant qu'un service qui en dépend tourne déjà. `nest start --watch`
+(`api`, `browser-worker`) et `tsx watch` (`worker`) ne surveillent que leur propre `src/` — jamais
+le `dist/` d'un package workspace dont ils dépendent. Le fichier source ET son `dist/` recompilé
+sont bien à jour sur disque (montage en direct), mais le **process Node déjà démarré** garde en
+mémoire la version du schéma chargée à son propre démarrage — `require()`/`import` ne relit jamais
+un module déjà chargé. Symptôme typique : après avoir ajouté un champ ou une variante à un schéma
+Zod partagé, certaines valeurs (les nouvelles) se voient rejetées à l'enregistrement pendant que
+les anciennes fonctionnent toujours — pas une erreur de validation en apparence liée au champ
+modifié, juste "certaines actions/valeurs ne s'enregistrent pas". Un `docker compose restart api
+worker browser-worker` (ou le service concerné) force chacun à relire son `dist/` à jamais au
+prochain démarrage, sans reconstruire d'image.
+
+**Un quatrième cas** : le volume anonyme `node_modules` d'un service peut rester incomplet même
+juste après un `--force-recreate -V` (client Prisma jamais généré, lien de workspace manquant vers
+un package tout juste ajouté) — l'écart reste invisible tant qu'aucun changement de fichier ne
+force `nest start --watch`/`tsx watch` à recompiler, donc peut n'apparaître que des heures plus
+tard, au premier changement réel. Symptôme côté `api`/`worker` : des dizaines d'erreurs
+`tsc` sur des propriétés Prisma pourtant réelles ; côté `browser-worker`/autre service : un module
+workspace introuvable. Se rattrape sans reconstruire l'image :
+`docker compose exec <service> sh -c "CI=true pnpm install --frozen-lockfile"` (le `CI=true` évite
+l'invite interactive "recréer les node_modules ?" en shell non interactif) régénère le client
+Prisma et les liens manquants — puis un `docker compose restart <service>` séparé est nécessaire
+dans certains cas : `tsc --watch` ne réinvalide pas une résolution de module déjà en échec
+simplement parce qu'un lien symbolique apparaît sur disque après coup.
+
+**`pnpm turbo run build` sur l'hôte n'est pas le seul à risque — `typecheck`/`lint`/`test` le sont
+tout autant.** `turbo.json` déclare ces quatre tâches avec `"dependsOn": ["^build"]` : lancer
+n'importe laquelle, même filtrée sur un seul service (`--filter=@datarover/api`), reconstruit
+d'abord silencieusement tous ses packages workspace dépendants (`workflow-types`,
+`browser-scripts`, `database`, …) — et leur `build` (`tsup`) commence par **vider** leur `dist/`
+avant de le réécrire. Si un conteneur de dev tourne déjà et dépend de l'un de ces packages, son
+propre `tsc --watch` (qui lit ce même `dist/`, monté en volume) peut traverser cette fenêtre videe
+et mémoriser à tort "module introuvable" — de façon durable : contrairement à une simple
+recompilation, ce cache de résolution ne se corrige pas tout seul au prochain changement de
+fichier, même une fois le vrai `dist/` réécrit correctement juste après. Symptôme : des dizaines
+d'erreurs sur des propriétés/modules qui existent bien, y compris longtemps après la commande hôte
+qui les a déclenchées (le service continue de servir sa dernière compilation réussie jusqu'au
+prochain changement de fichier — le problème peut donc rester invisible pendant des heures).
+Rien à réinstaller dans ce cas, juste `docker compose restart <service>` pour repartir d'une
+compilation fraîche — **par réflexe, après toute commande `pnpm turbo run ...` lancée côté hôte**
+tant qu'un conteneur de dev dépendant du package concerné tourne.
+
+Tout est construit à partir d'un **unique** `Dockerfile`/`Dockerfile.dev` partagé (Specs.md §21) —
+`turbo prune` réduit le monorepo à ce dont chaque service a réellement besoin ; `--target` choisit
+l'image finale (`runner` pour `api`/`worker`, `runner-browser-worker` — `runner` + un vrai
+Chromium —, `runner-web` — nginx servant le build statique —, `runner-migrate`). Détails/pièges
+rencontrés : voir `ARCHITECTURE.md`, itération 8.
+
+Si un process local (`pnpm dev`) tourne déjà sur les mêmes ports (3001/3002/5173/5432/6379),
+arrête-le d'abord — Docker et le mode local ne sont pas censés cohabiter sur les mêmes ports. Si
+des conteneurs de **production** tournent déjà (démarrés sans `docker-compose.dev.yml`), relancer
+directement avec les deux `-f` reconfigure les services en place (pas besoin de `down` d'abord),
+mais `docker compose down` puis la commande dev reste l'option la plus sûre en cas de doute.
+Les identifiants/ports sont configurables via `.env` (voir [`.env.example`](./.env.example)) ;
+tout fonctionne aussi sans aucun `.env` (valeurs par défaut intégrées dans `docker-compose.yml`).
 
 ---
 
@@ -207,8 +315,9 @@ Turborepo build automatiquement les dépendances d'un package avant de tester (`
 | `packages/extractor` | Extraction CSS/JSONPath/XML/Regex, score de robustesse des sélecteurs |
 | `packages/workflow-core` | Moteur : retry/timeout, parcours de graphe, **test d'intégration** avec un vrai serveur HTTP local |
 | `packages/queue` | Lecture des options de connexion Redis depuis l'environnement |
-| `apps/api` | **Tests e2e** (requêtes réelles via l'injection Fastify) contre un **vrai** Postgres/Redis — nécessite `pnpm infra:up` au préalable |
-| `apps/worker` | **Test d'intégration** : exécute un vrai job contre Postgres/Redis + un serveur HTTP local de fixture |
+| `apps/api` | **Tests e2e** (requêtes réelles via l'injection Fastify) contre un **vrai** Postgres/Redis — nécessite `pnpm infra:up` au préalable ; le rendu JavaScript (`render: true`) est testé contre un faux `browser-worker` (fixture HTTP), pas un vrai Chrome — voir `apps/browser-worker` ci-dessous |
+| `apps/worker` | **Test d'intégration** : exécute un vrai job contre Postgres/Redis + un serveur HTTP local de fixture, y compris un vrai déclenchement de planification en temps réel (BullMQ job scheduler) |
+| `apps/browser-worker` | **Tests e2e** contre un **vrai** Chrome/Chromium (SPA rendue, bandeau de consentement dismiss, en-têtes transmis, cible injoignable → 400) — nécessite un Chrome/Chromium installé localement (voir [Prérequis](#prérequis)) |
 | `apps/web` | Voir [Tests de l'UI](#tests-de-lui-appsweb) ci-dessous |
 
 Les suites d'`apps/api` et `apps/worker` ont besoin d'une vraie base/queue disponibles
@@ -264,6 +373,11 @@ Rejoue dans un **vrai navigateur** (Firefox headless, piloté via `selenium-webd
   node, fait glisser la poignée sur son bord gauche avec un vrai geste pointeur (`driver.actions()`)
   de 100px vers la gauche, vérifie que le panneau s'élargit réellement en conséquence, puis
   recharge la page et confirme que la largeur choisie a survécu (persistée en `localStorage`).
+- `schedules.e2e.test.ts` — celui de l'itération 7 (scheduler, §14) : ouvre le panneau "⏱
+  Planification", ajoute une planification "toutes les 15 minutes", l'active/désactive réellement,
+  soumet une expression cron invalide (message d'erreur visible, aucune ligne créée) puis une
+  valide, supprime la première planification, et recharge la page pour confirmer que celle qui
+  reste a bien persisté côté serveur.
 
 Firefox plutôt que Chromium/Playwright : le Chromium embarqué par Playwright nécessite des
 bibliothèques système installées via `sudo apt-get`, indisponible sur certaines machines de dev de

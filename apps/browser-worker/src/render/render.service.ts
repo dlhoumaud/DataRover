@@ -33,29 +33,31 @@ export interface RenderedPage {
 
 /**
  * Renders a URL in a real, disposable headless browser and returns the resulting DOM as a static
- * HTML string — backs the "Rendu JavaScript" option of the preview tool (Specs.md §6), for target
- * pages whose real content only exists after client-side JS runs (a React/Vue SPA shell with no
- * meaningful server-rendered markup — verified against a real reported page: no `<h1>` at all in
- * the plain fetch, even with a crawler-friendly User-Agent).
+ * HTML string. Backs the "Rendu JavaScript" option of apps/api's preview tool (Specs.md §6), for
+ * target pages whose real content only exists after client-side JS runs.
  *
- * This is the ONLY place in the app that ever executes a target site's own JavaScript, and it
- * happens in a fully separate, disposable OS process (the browser this service drives) — never
- * inside this Node process, and never inside the frontend. The HTML this returns is inert text by
- * the time it reaches apps/web: it goes through the exact same sanitization pipeline
- * (buildSandboxedDocument) as a plain, unrendered fetch, scripts stripped and never re-executed.
+ * This whole service is the ONLY place in the app that ever executes a target site's own
+ * JavaScript, and it happens in a fully separate, disposable OS process (the browser this service
+ * drives) — never inside apps/api's process, never inside apps/worker, and never inside the
+ * frontend. Isolated into its own deployable unit (Specs.md §19-20's "browser-worker", explicitly
+ * required to be separate from the HTTP worker) specifically so a slow/stuck/crashed render can
+ * never starve request handling in apps/api or execution processing in apps/worker — it only ever
+ * affects this one process, and only the interactive preview feature.
+ *
+ * The HTML this returns is inert text by the time it reaches apps/web: apps/api forwards it
+ * through the exact same sanitization pipeline (buildSandboxedDocument) as a plain, unrendered
+ * fetch, scripts stripped and never re-executed.
  *
  * Scoped strictly to the interactive editor tool — never to workflow *execution*. The engine's
  * `http` executor stays HTTP-only (undici); this does not change ARCHITECTURE.md's documented
  * scope boundary that browser crawling isn't implemented for the engine itself.
  *
- * Drives whatever real Chrome/Chromium is already installed on the machine (see chromeBinary.ts)
- * rather than have `playwright-core` download and manage its own browser build — both to skip
- * that network/disk cost and because the bundled build needs system libraries this environment may
- * not have `sudo` to install.
+ * Drives whatever real Chrome/Chromium is already installed (see chromeBinary.ts) rather than
+ * have `playwright-core` download and manage its own browser build.
  */
 @Injectable()
-export class BrowserRendererService implements OnModuleDestroy {
-  private readonly logger = new Logger(BrowserRendererService.name);
+export class RenderService implements OnModuleDestroy {
+  private readonly logger = new Logger(RenderService.name);
   private browserPromise: Promise<Browser> | null = null;
 
   async render(url: string, headers: Record<string, string> | undefined): Promise<RenderedPage> {
@@ -68,8 +70,15 @@ export class BrowserRendererService implements OnModuleDestroy {
       }
 
       // "domcontentloaded" first (fast, rarely times out) — a genuine failure here (DNS,
-      // connection refused, an actual navigation timeout) is a real problem worth surfacing.
-      const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: RENDER_TIMEOUT_MS });
+      // connection refused, an actual navigation timeout, a port Chrome itself refuses to dial)
+      // is the caller's URL being bad, not this service breaking — a 400, not a 500.
+      let response;
+      try {
+        response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: RENDER_TIMEOUT_MS });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new BadRequestException(`Failed to navigate to "${url}": ${message}`);
+      }
 
       await this.dismissConsentBanner(page);
 
@@ -175,6 +184,11 @@ export class BrowserRendererService implements OnModuleDestroy {
       this.browserPromise = null;
       throw error;
     }
+  }
+
+  /** Used by HealthController to report whether this service can actually render anything. */
+  hasChromeAvailable(): boolean {
+    return resolveChromeBinary() !== undefined;
   }
 
   async onModuleDestroy(): Promise<void> {

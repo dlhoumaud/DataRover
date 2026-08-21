@@ -13,7 +13,9 @@ import { NODE_COLORS, NODE_LABELS } from "../../lib/nodeStyles";
 
 export function WorkflowNode({ id, data, selected }: NodeProps<FlowNode>): JSX.Element {
   const selectNode = useEditorStore((state) => state.selectNode);
+  const startNodeId = useEditorStore((state) => state.startNodeId);
   const { node } = data;
+  const isStart = id === startNodeId;
 
   return (
     <div
@@ -22,6 +24,14 @@ export function WorkflowNode({ id, data, selected }: NodeProps<FlowNode>): JSX.E
         selected ? "border-indigo-500 ring-2 ring-indigo-400 ring-offset-1" : "border-gray-200"
       }`}
     >
+      {isStart && (
+        <span
+          className="absolute -top-2 -left-2 rounded-full bg-green-600 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white shadow"
+          title="Nœud de départ — l'exécution du workflow commence ici"
+        >
+          ▶ Départ
+        </span>
+      )}
       <Handle type="target" position={Position.Left} className="!h-2.5 !w-2.5 !bg-gray-400" />
 
       <div className="flex items-center gap-2">
@@ -82,4 +92,5 @@ export const nodeTypes = {
   dataTransform: WorkflowNode,
   textCrypto: WorkflowNode,
   loop: WorkflowNode,
+  browserAction: WorkflowNode,
 };

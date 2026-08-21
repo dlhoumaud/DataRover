@@ -1,11 +1,15 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
 import { Prisma, type Project as ProjectRow } from "@datarover/database";
 import { PrismaService } from "../prisma/prisma.service";
+import { SchedulesService } from "../schedules/schedules.service";
 import type { CreateProjectDto, UpdateProjectDto } from "./dto";
 
 @Injectable()
 export class ProjectsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly schedulesService: SchedulesService,
+  ) {}
 
   async create(dto: CreateProjectDto): Promise<ProjectRow> {
     return this.prisma.project.create({
@@ -46,6 +50,9 @@ export class ProjectsService {
 
   async remove(id: string): Promise<void> {
     await this.findOneOrThrow(id);
+    // See WorkflowsService.remove's identical comment — cascading through every workflow this
+    // project owns.
+    await this.schedulesService.removeAllJobSchedulersForProject(id);
     await this.prisma.project.delete({ where: { id } });
   }
 }

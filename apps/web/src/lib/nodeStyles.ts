@@ -7,22 +7,24 @@ import type { ActionNode } from "@datarover/workflow-types";
  */
 export const NODE_COLORS: Record<ActionNode["type"], string> = {
   http: "bg-blue-500",
-  extract: "bg-purple-500",
-  condition: "bg-yellow-500",
+  browserAction: "bg-blue-300",
+  extract: "bg-cyan-500",
+  condition: "bg-orange-500",
+  loop: "bg-orange-300",
   setVariable: "bg-green-500",
-  stop: "bg-red-500",
-  dataTransform: "bg-teal-500",
-  textCrypto: "bg-orange-500",
-  loop: "bg-pink-500",
+  dataTransform: "bg-green-300",
+  textCrypto: "bg-green-200",
+  stop: "bg-black",
 };
 
 export const NODE_LABELS: Record<ActionNode["type"], string> = {
   http: "http",
+  browserAction: "Navigateur",
   extract: "extract",
   condition: "condition",
+  loop: "Boucle",
   setVariable: "setVariable",
-  stop: "stop",
   dataTransform: "Traitement",
   textCrypto: "textCrypto",
-  loop: "Boucle",
+  stop: "stop",
 };

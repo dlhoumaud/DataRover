@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { ActionNode, ExtractionRule, ExtractSourceType } from "@datarover/workflow-types";
 import { HttpNodeInspector } from "./inspectors/HttpNodeInspector";
 import { ExtractNodeInspector } from "./inspectors/ExtractNodeInspector";
@@ -7,8 +8,57 @@ import { StopNodeInspector } from "./inspectors/StopNodeInspector";
 import { DataTransformNodeInspector } from "./inspectors/DataTransformNodeInspector";
 import { TextCryptoNodeInspector } from "./inspectors/TextCryptoNodeInspector";
 import { LoopNodeInspector } from "./inspectors/LoopNodeInspector";
+import { BrowserActionNodeInspector } from "./inspectors/BrowserActionNodeInspector";
 import { NODE_LABELS } from "../lib/nodeStyles";
 import { useResizableWidth } from "../lib/useResizableWidth";
+import { getNodeOutputVariables, type TemplateVariable } from "../lib/templateVariables";
+
+/**
+ * Every `{{ }}`-usable reference the currently-open node contributes once it has run (see
+ * `getNodeOutputVariables`'s own doc comment for exactly what's known per node type) — shown here,
+ * once, for every node type, rather than duplicated inside each individual inspector, so a node
+ * connected downstream of this one can be configured to reference it correctly without needing to
+ * remember/guess this node's id or output shape. Click any entry to copy its `{{ }}` form.
+ */
+function NodeOutputVariables({ node }: { node: ActionNode }): JSX.Element {
+  const [copiedPath, setCopiedPath] = useState<string | null>(null);
+  const variables = getNodeOutputVariables(node);
+
+  function handleCopy(path: string): void {
+    navigator.clipboard
+      .writeText(`{{ ${path} }}`)
+      .then(() => {
+        setCopiedPath(path);
+        setTimeout(() => setCopiedPath((current) => (current === path ? null : current)), 1500);
+      })
+      .catch(() => undefined);
+  }
+
+  return (
+    <div className="border-b border-gray-200 px-4 py-2">
+      <p className="text-xs font-medium text-gray-500">
+        {variables.length > 1 ? "Variables de sortie" : "Variable de sortie"}
+      </p>
+      <ul className="mt-1 space-y-0.5">
+        {variables.map((variable) => (
+          <li key={variable.path}>
+            <button
+              type="button"
+              onClick={() => handleCopy(variable.path)}
+              title="Copier la référence {{ }}"
+              className="flex w-full items-center justify-between rounded px-1 py-0.5 text-left font-mono text-xs text-gray-600 hover:bg-gray-50"
+            >
+              <span className="truncate">{`{{ ${variable.path} }}`}</span>
+              <span className="ml-2 flex-shrink-0 text-gray-400">
+                {copiedPath === variable.path ? "Copié !" : "copier"}
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 const DEFAULT_WIDTH = 320; // matches the previous fixed `w-80`
 const MIN_WIDTH = 280;
@@ -18,6 +68,7 @@ const WIDTH_STORAGE_KEY = "datarover.nodeInspectorPanel.width";
 export function NodeInspectorPanel({
   node,
   availableNodeIds,
+  variables,
   projectId,
   onChange,
   onClose,
@@ -25,6 +76,10 @@ export function NodeInspectorPanel({
 }: {
   node: ActionNode | null;
   availableNodeIds: string[];
+  /** Every `{{ }}`-usable variable currently available to this node — see
+   *  `lib/templateVariables.ts`'s `getAvailableVariables`. Forwarded to every inspector whose
+   *  fields accept a `{{ }}` template, for `TemplateInput`'s autocomplete. */
+  variables: TemplateVariable[];
   /** Needed by HttpNodeInspector's preview & selection tool (Specs.md §6). */
   projectId: string;
   onChange: (updated: ActionNode) => void;
@@ -61,6 +116,7 @@ export function NodeInspectorPanel({
             onChange={onChange}
             projectId={projectId}
             onCreateExtractNode={onCreateExtractNode}
+            variables={variables}
           />
         );
       case "extract":
@@ -75,15 +131,25 @@ export function NodeInspectorPanel({
       case "condition":
         return <ConditionNodeInspector key={currentNode.id} node={currentNode} onChange={onChange} />;
       case "setVariable":
-        return <SetVariableNodeInspector key={currentNode.id} node={currentNode} onChange={onChange} />;
+        return (
+          <SetVariableNodeInspector key={currentNode.id} node={currentNode} onChange={onChange} variables={variables} />
+        );
       case "stop":
         return <StopNodeInspector key={currentNode.id} node={currentNode} onChange={onChange} />;
       case "dataTransform":
-        return <DataTransformNodeInspector key={currentNode.id} node={currentNode} onChange={onChange} />;
+        return (
+          <DataTransformNodeInspector key={currentNode.id} node={currentNode} onChange={onChange} variables={variables} />
+        );
       case "textCrypto":
-        return <TextCryptoNodeInspector key={currentNode.id} node={currentNode} onChange={onChange} />;
+        return (
+          <TextCryptoNodeInspector key={currentNode.id} node={currentNode} onChange={onChange} variables={variables} />
+        );
       case "loop":
-        return <LoopNodeInspector key={currentNode.id} node={currentNode} onChange={onChange} />;
+        return <LoopNodeInspector key={currentNode.id} node={currentNode} onChange={onChange} variables={variables} />;
+      case "browserAction":
+        return (
+          <BrowserActionNodeInspector key={currentNode.id} node={currentNode} onChange={onChange} variables={variables} />
+        );
       default: {
         const exhaustiveCheck: never = currentNode;
         throw new Error(`Type de node non supporté: ${String((exhaustiveCheck as ActionNode).type)}`);
@@ -120,6 +186,7 @@ export function NodeInspectorPanel({
           Fermer
         </button>
       </div>
+      <NodeOutputVariables node={currentNode} />
       <div className="flex-1 overflow-y-auto px-4 py-4">{renderInspector()}</div>
     </aside>
   );

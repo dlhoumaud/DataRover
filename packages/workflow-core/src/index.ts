@@ -15,6 +15,7 @@ export type {
   NodeExecutor,
 } from "./executors/types.js";
 
+export { browserActionExecutor } from "./executors/browserActionExecutor.js";
 export { conditionExecutor } from "./executors/conditionExecutor.js";
 export { dataTransformExecutor } from "./executors/dataTransformExecutor.js";
 export { extractExecutor } from "./executors/extractExecutor.js";

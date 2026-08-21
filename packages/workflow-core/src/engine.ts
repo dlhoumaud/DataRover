@@ -6,10 +6,12 @@ import type {
   ActionResult,
   Execution,
   ExecutionLogEntry,
+  RetryPolicy,
   WorkflowDefinition,
 } from "@datarover/workflow-types";
 
 import type { ExecutionEvent } from "./events.js";
+import { browserActionExecutor } from "./executors/browserActionExecutor.js";
 import { conditionExecutor } from "./executors/conditionExecutor.js";
 import { dataTransformExecutor } from "./executors/dataTransformExecutor.js";
 import { extractExecutor } from "./executors/extractExecutor.js";
@@ -50,13 +52,24 @@ function nowIso(): string {
 }
 
 /**
+ * `retryPolicy` is optional on every node type except `browserAction`, which omits it from its
+ * schema entirely (see `BrowserActionNodeSchema`'s doc comment in `@datarover/workflow-types`) —
+ * replaying its whole step sequence on retry would risk re-running an already-succeeded action
+ * like a submit click. A plain `node.retryPolicy` access doesn't type-check across that union
+ * once one member lacks the property at all, hence this narrow accessor rather than reaching for
+ * `node.retryPolicy` directly at either call site below.
+ */
+function getRetryPolicy(node: ActionNode): RetryPolicy | undefined {
+  return "retryPolicy" in node ? node.retryPolicy : undefined;
+}
+
+/**
  * Executes `WorkflowDefinition` graphs.
  *
- * Ships with eight default node executors (`http`, `extract`, `condition`,
- * `setVariable`, `stop`, `dataTransform`, `textCrypto`, `loop`); pass `executors` to
- * the constructor to override or extend that registry (e.g. to add a
- * `"browser"` executor in a future version) without needing to modify this
- * class.
+ * Ships with nine default node executors (`http`, `extract`, `condition`,
+ * `setVariable`, `stop`, `dataTransform`, `textCrypto`, `loop`, `browserAction`); pass
+ * `executors` to the constructor to override or extend that registry without needing to modify
+ * this class.
  */
 export class WorkflowEngine {
   private readonly executors: Record<string, NodeExecutor>;
@@ -71,6 +84,7 @@ export class WorkflowEngine {
       dataTransform: dataTransformExecutor as NodeExecutor,
       textCrypto: textCryptoExecutor as NodeExecutor,
       loop: loopExecutor as NodeExecutor,
+      browserAction: browserActionExecutor as NodeExecutor,
     };
     this.executors = { ...defaults, ...options?.executors } as Record<string, NodeExecutor>;
   }
@@ -152,7 +166,7 @@ export class WorkflowEngine {
       if (executor === undefined) {
         throw new Error(`No executor registered for node type "${node.type}"`);
       }
-      return withRetry(async () => withTimeout(() => executor(node, nodeCtx), node.timeoutMs), node.retryPolicy);
+      return withRetry(async () => withTimeout(() => executor(node, nodeCtx), node.timeoutMs), getRetryPolicy(node));
     };
 
     const runStartedAt = Date.now();
@@ -201,7 +215,7 @@ export class WorkflowEngine {
         const result = await withRetry(async () => {
           attempts++;
           return withTimeout(() => executor(node, nodeContext), node.timeoutMs);
-        }, node.retryPolicy);
+        }, getRetryPolicy(node));
 
         const durationMs = Date.now() - nodeStartedAtMs;
         actionsOutput[node.id] = { output: result.output };

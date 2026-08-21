@@ -61,8 +61,10 @@ Modèle de données Prisma : `WorkflowVersion` est immutable (modifier un workfl
 version, §16 « versionné ») ; `Execution.workflowVersionId` fige la version réellement exécutée
 même si le workflow est modifié après coup ; `ExecutionLog` est une table séparée (pas un blob JSON)
 pour permettre une lecture incrémentale/temps réel à l'itération WebSocket. `Schedule` et
-`Credential` (§17.5) ne sont **pas** créés — ils appartiennent aux itérations scheduler/auth, non
-demandées ici.
+`Credential` (§17.5) n'étaient **pas** créés à cette itération — ils appartenaient aux itérations
+scheduler/auth, non demandées à l'époque. `Schedule` est livré depuis (itération 7, voir plus bas :
+`POST`/`GET /workflows/:id/schedules`, `PATCH`/`DELETE /schedules/:id`) ; `Credential` reste hors
+périmètre.
 
 **Piège technique documenté** (voir commentaires dans le code) : NestJS résout l'injection de
 dépendances via `emitDecoratorMetadata` (reflect-metadata), qui exige que les classes injectées
@@ -583,25 +585,726 @@ de 100px vers la gauche via `driver.actions()`, largeur du panneau effectivement
 Selenium qui ciblaient le texte exact (`nodeContextMenu.e2e.test.ts`) ont été mis à jour en
 conséquence.
 
+## Itération 7 — Scheduler exécutable (livrée)
+
+Les types `Schedule`/`ScheduleType` existaient déjà (Specs.md §14) ; cette itération les rend
+réellement exécutables : table Prisma, endpoints CRUD, déclenchement réel via BullMQ, UI.
+
+Architecture logique, en reprenant exactement le schéma de §14 :
+
+```text
+Schedule (Postgres)
+    ↓ upsertJobScheduler (apps/api)
+BullMQ job scheduler ("workflow-schedule-triggers")
+    ↓ tick (à l'heure due)
+apps/worker : processScheduleTrigger → crée un Execution "pending"
+    ↓ enqueueExecution
+BullMQ ("workflow-executions") — la queue existante, inchangée
+    ↓
+apps/worker : processExecutionJob (déjà livré, itération 2) → WorkflowEngine.run
+```
+
+- **`packages/database/prisma/schema.prisma`** : nouveau modèle `Schedule` (`type` — enum Prisma
+  natif `manual|interval|hourly|daily|weekly|cron`, mêmes valeurs que le `ScheduleType` Zod déjà
+  existant —, `everyMinutes`/`cronExpression` optionnels, `enabled`), relié à `Workflow` avec
+  `onDelete: Cascade`. `type: "manual"` et `enabled: false` signifient tous les deux "ne se
+  déclenche jamais tout seul" — la différence est purement l'intention de l'utilisateur (un choix
+  explicite "pas de planification" contre une pause temporaire) ; apps/api n'enregistre un job
+  scheduler BullMQ que pour une ligne à la fois activée et non `manual`.
+- **`packages/queue`** : nouvelle queue `SCHEDULE_TRIGGER_QUEUE_NAME`
+  (`"workflow-schedule-triggers"`), distincte de la queue d'exécution existante — les deux formes
+  de job n'ont rien en commun (un tick de planification n'a pas encore d'`Execution`).
+- **`apps/api/src/schedules/`** : `POST`/`GET /workflows/:workflowId/schedules`,
+  `PATCH`/`DELETE /schedules/:id`. La validation Zod (`dto.ts`) exige `everyMinutes` pour
+  `interval` et une `cronExpression` qui **parse réellement** pour `cron` — vérifiée avec
+  `cron-parser`, épinglé à la même version exacte que celle dont dépend `bullmq` en interne, pour
+  que ce qui est accepté ici soit garanti accepté par BullMQ ensuite. `hourly`/`daily`/`weekly` se
+  traduisent en motifs cron fixes calés sur l'horloge murale (`0 * * * *`, `0 0 * * *`,
+  `0 0 * * 0` — schedule-repeat.ts) plutôt qu'un "toutes les N ms depuis maintenant", qui dériverait
+  à chaque redémarrage du serveur. `SchedulesService` n'écrit jamais d'`Execution` ni n'exécute le
+  moteur — seulement la ligne `Schedule` et le *job scheduler* BullMQ associé (`upsertJobScheduler`/
+  `removeJobScheduler`, une primitive BullMQ 5.x dédiée exactement à ce cas : un déclencheur
+  récurrent identifié par une clé stable, ici l'id du `Schedule`).
+- **Nettoyage cross-cutting** : supprimer un `Workflow` (ou un `Project`, qui cascade à travers
+  tous ses workflows) supprime bien les lignes `Schedule` via `ON DELETE CASCADE` côté Postgres,
+  mais Postgres n'a aucun moyen d'aller nettoyer l'état BullMQ correspondant côté Redis. Corrigé en
+  appelant `SchedulesService.removeAllJobSchedulersFor{Workflow,Project}` avant chaque suppression
+  (`WorkflowsService.remove`/`ProjectsService.remove`) — sans quoi un job scheduler orphelin
+  continuerait de créer des `Execution` pour un workflow qui n'existe plus.
+- **`apps/worker/src/processScheduleTrigger.ts`** : consomme la queue de déclenchement, crée un
+  `Execution` "pending" et l'enfile sur la queue d'exécution existante — exactement le chemin que
+  prend un clic manuel sur "Exécuter" (`ExecutionsService.createForWorkflow`), simplement déclenché
+  par un tick BullMQ plutôt qu'une requête HTTP. Tolère explicitement la course entre un tick déjà
+  en vol et une planification désactivée/supprimée entre-temps (comportement normal, pas une
+  erreur) en passant son tour silencieusement plutôt que de lever.
+- **`apps/web/src/components/SchedulesPanel.tsx`** : bouton "⏱ Planification" dans l'en-tête de
+  l'éditeur — liste les planifications du workflow ouvert, case à cocher "Actif" par ligne,
+  formulaire d'ajout dont les champs changent selon le type choisi. Modifier le type/les paramètres
+  d'une planification existante n'est pas supporté (mirroring `UpdateScheduleSchema`, qui n'accepte
+  que `enabled`) — changer la récurrence signifie supprimer puis recréer.
+
+**Vérifié** : 436 tests Vitest au total dans le monorepo (+16 `apps/api` : 6 pour
+`schedule-repeat.ts`, 10 e2e contre un vrai Postgres/Redis — dont la lecture directe de l'état
+BullMQ via `queue.getJobScheduler()` pour prouver que l'API enregistre réellement le bon motif, pas
+seulement qu'elle répond 201 — et +5 `apps/worker`, dont un test qui fait **réellement tourner** un
+`Worker`/`Queue` BullMQ en direct avec un intervalle de 2 secondes et attend le vrai déclenchement,
+plutôt que d'appeler la fonction directement). Nouveau scénario e2e navigateur committé
+(`apps/web/e2e/schedules.e2e.test.ts`) : ajout d'une planification "toutes les 15 minutes",
+activation/désactivation réelle, rejet d'une expression cron invalide avec message d'erreur visible,
+ajout d'une planification cron valide, suppression, puis **rechargement complet de la page**
+confirmant la persistance côté serveur.
+
+**Un vrai bug de script de test trouvé pendant la vérification** (pas dans l'application) : le
+test "tourne pour de vrai" de `processScheduleTrigger.test.ts` utilisait d'abord la queue de
+production `SCHEDULE_TRIGGER_QUEUE_NAME` — un vrai process `apps/worker` de développement tournant
+en parallèle sur le même Redis (l'environnement de vérification manuelle de ce même tour) lui volait
+alors la moitié des jobs (BullMQ ne livre un job qu'à un seul consommateur parmi tous ceux qui
+écoutent une queue), faisant échouer le test de façon intermittente sans que le code testé soit en
+cause. Corrigé en isolant ce test sur un nom de queue jetable (`processScheduleTrigger` lui-même ne
+sait pas, et n'a pas besoin de savoir, quelle queue a livré le job).
+
+## Itération 8 — Docker complet (livrée)
+
+`docker compose up --build` (la commande cible exacte de Specs.md §19) démarre désormais
+l'environnement complet — `web`, `api`, `worker`, `browser-worker`, `postgres`, `redis` — sur un
+seul réseau Docker, sans étape manuelle (migrations comprises).
+
+### `browser-worker` devient un vrai service séparé
+
+Jusqu'ici, le rendu JavaScript de l'outil de preview (itération 4) tournait **dans le processus
+`apps/api`** (`BrowserRendererService`, Playwright). Specs.md §19-20 exige explicitement que
+`browser-worker` soit un service à part, séparé du worker HTTP, précisément pour qu'un rendu
+lent/bloqué/planté ne puisse jamais affecter autre chose que lui-même — une exigence que
+"tourner dans le même processus que le reste de l'API" ne satisfaisait pas, containerisation ou
+non. Extrait dans une nouvelle app **`apps/browser-worker`** : un micro-service NestJS+Fastify
+avec une seule route (`POST /render`), qui reprend le code de rendu existant tel quel
+(`chromeBinary.ts`, la logique de rendu/dismissal de bandeau cookies — inchangée). `apps/api` ne
+dépend plus de `playwright-core` du tout (supprimé de son `package.json`) : son
+`BrowserWorkerClient` (`apps/api/src/tools/browser-worker.client.ts`) appelle ce service par HTTP
+(`BROWSER_WORKER_URL`, `undici`), et traduit ses erreurs exactement comme le faisait l'ancien code
+in-process.
+
+**Bénéfice inattendu, découvert en migrant les tests** : `apps/api/test/tools.e2e.test.ts` n'a
+plus besoin d'un vrai Chrome pour ses propres tests — seulement d'un faux `browser-worker` (un
+simple serveur HTTP fixture, comme pour n'importe quel autre test e2e de ce fichier), puisque
+driver un vrai navigateur est désormais la responsabilité exclusive de
+`apps/browser-worker/test/render.e2e.test.ts` (qui, lui, garde une vraie vérification contre un
+vrai Chrome — bandeau de consentement compris). Toute la suite `apps/api` est passée de ~10s à
+~0.3s d'exécution, sans perdre la moindre couverture : c'est un signe que le découpage suit bien
+une frontière de responsabilité réelle, pas seulement une frontière de déploiement.
+
+### Un seul `Dockerfile` (et un seul `Dockerfile.dev`) pour les quatre services Node
+
+Specs.md §21 demande explicitement un unique `Dockerfile`/`Dockerfile.dev` (noms au singulier),
+pas un par service. Réalisé via le patron officiellement recommandé par Turborepo pour ce cas —
+`turbo prune <package> --docker`, qui réduit le monorepo à la seule sous-arborescence dont ce
+service a réellement besoin (déterminé depuis le graphe de dépendances réel, jamais à la main) —
+puis une image finale choisie par `--target` : `runner` (Node nu, `api`/`worker`), `runner-browser-
+worker` (`runner` + un vrai Chromium Alpine), `runner-web` (nginx servant le build statique de
+`apps/web`), et `runner-migrate` (`prisma migrate deploy`, un job unique qui s'arrête après avoir
+appliqué les migrations en attente — `api`/`worker` attendent explicitement sa réussite avant de
+démarrer, donc un tout premier `docker compose up --build` sur une base vide n'a besoin d'aucune
+étape manuelle).
+
+**Deux vrais pièges du patron `turbo prune` rencontrés en le faisant fonctionner pour de vrai**
+(aucun des deux n'est mentionné dans la documentation Turborepo elle-même) :
+1. `out/json` (la couche mise en cache dès que les *dépendances* changent, avant même de copier le
+   vrai code source) ne contient que des `package.json` — mais `packages/database` a son propre
+   script `postinstall: prisma generate`, qui a besoin du fichier `schema.prisma` réel, absent à
+   ce stade. Corrigé en installant avec `--ignore-scripts` à cette étape, puis en rejouant tous les
+   scripts d'installation (`pnpm rebuild`) une fois `out/full` (le vrai code source) copié.
+2. `out/full` ne contient que les fichiers appartenant aux packages *inclus* dans l'élagage — pas
+   les fichiers à la racine du monorepo dont ils dépendent quand même (`tsconfig.base.json`, dont
+   hérite le `tsconfig.json` de chaque package). Corrigé en les copiant explicitement dans l'image
+   après `out/full`.
+
+### `apps/web` : servi par nginx (prod), servi par Vite (dev) — jamais par `node dist/main.js`
+
+Seul service statique du lot. `runner-web` construit `apps/web/dist` (Vite) puis le sert via
+nginx (`docker/nginx.conf` — `try_files ... /index.html` pour le fallback SPA du routeur
+client, sans quoi un rechargement sur `/projects/abc` renverrait un 404 nginx plutôt que de laisser
+react-router prendre le relais). Piège classique des SPA en Docker, explicitement contourné :
+`VITE_API_URL` est **inliné dans le JS au moment du build de l'image** (Vite n'a aucune
+configuration "au runtime" pour une SPA statique) — il doit donc pointer vers l'adresse qu'un
+**navigateur sur la machine hôte** peut atteindre (le port publié de `api`, ex.
+`http://localhost:3001`), jamais vers le nom de service interne au réseau Docker
+(`http://api:3001`, injoignable depuis l'extérieur du réseau Docker).
+
+### Mode développement (`docker-compose.dev.yml`)
+
+`docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build` : chaque service Node
+tourne via son `pnpm --filter <pkg> dev` habituel (hot reload nest/tsx/vite) au lieu d'un
+`dist/main.js` compilé, avec le dépôt monté en volume — modifier un fichier sur l'hôte se répercute
+immédiatement dans le conteneur. Un volume anonyme sur `/app/node_modules` (un seul, pas un par
+package) masque spécifiquement la racine `node_modules` du montage bind — suffisant parce que le
+`node_modules` de chaque package de l'espace de travail n'est, chez pnpm, qu'un lien symbolique
+relatif vers ce magasin racine ; il se résout donc correctement vers la copie du conteneur sans
+avoir besoin de son propre volume dédié.
+
+**Vérifié** : les 5 images (`migrate`, `api`, `worker`, `browser-worker`, `web`) se construisent et
+`docker compose up --build` démarre les 6 services avec succès (`api`/`browser-worker` rapportent
+`healthy` sur leur `/health`, `migrate` s'arrête à 0). Preuve d'exécution bout en bout réelle, à
+travers la stack **entièrement containerisée** (pas de raccourci vers un process local) : création
+d'un projet → d'un workflow → déclenchement d'une exécution → le `worker` (son propre conteneur)
+la traite et la fait passer à `success` ; et séparément, un aperçu avec rendu JavaScript
+(`render: true`) traverse réellement `api` → `browser-worker` → un vrai Chromium dans son propre
+conteneur, réseau Docker interne compris (résolution DNS du nom de service `browser-worker` vérifiée
+directement). La suite e2e navigateur existante (`apps/web/e2e/`) a été rejouée sans modification
+contre la stack containerisée : 5 des 7 scénarios passent tels quels ; les 2 restants
+(`preview.e2e.test.ts`) échouent pour une raison attendue et documentée, pas un bug — ils démarrent
+un serveur de fixture local lié à `127.0.0.1` côté hôte, injoignable depuis le conteneur `api`
+(`127.0.0.1`, vu de l'intérieur d'un conteneur, désigne sa propre boucle locale, jamais celle de
+l'hôte) ; ces deux tests restent la référence pour l'usage normal (`pnpm test:e2e` contre la stack
+lancée via `pnpm dev`), pas contre la stack containerisée. 443 tests Vitest au total dans le
+monorepo (+7 `apps/browser-worker`).
+
+**Un vrai bug de process trouvé pendant la vérification** (pas dans le code applicatif) : plusieurs
+`nest start --watch`/`tsx watch` de développement local, accumulés au fil des redémarrages successifs
+de cette session, tournaient encore en tâche de fond et se disputaient les mêmes ports/queues avec
+les conteneurs Docker — nettoyés avant de lancer `docker compose up`.
+
+## Itération 9 — Node "Navigateur" (`browserAction`) : exécution batch (Phase A, livrée)
+
+Nouveau type de node, à la demande explicite de l'utilisateur : comme `http`, mais pilotant un
+**vrai navigateur Playwright** (clics, frappe clavier caractère-par-caractère, survol, glisser-
+déposer, défilement) pour les sites qui n'exposent leur vrai contenu qu'après une interaction
+réelle. **Ceci lève partiellement**, et de façon délibérée, l'entrée "Browser crawling / Playwright
+pour l'exécution des workflows" de la section précédente : le moteur d'exécution
+(`packages/workflow-core`) exécute désormais réellement du JS via un navigateur piloté, pour ce
+type de node précisément — l'exécuteur `http` lui-même reste strictement HTTP (Undici), inchangé.
+
+**Uniquement la moitié "batch" pour l'instant** — pas encore la preview live interactive avec
+enregistrement des actions de l'utilisateur, qui reste une pièce séparée (voir la nouvelle entrée
+hors périmètre ci-dessous) : ce node se configure aujourd'hui en éditant sa liste d'actions à la
+main dans l'inspecteur, sans preview.
+
+- **Schéma** (`packages/workflow-types/src/action.ts`) : `BrowserActionNodeSchema`
+  (`startUrl` + `steps: BrowserActionStepSchema[]`) — onze variantes de step
+  (`navigate`/`click`/`type`/`press`/`select`/`hover`/`dragTo`/`scrollIntoView`/`scrollPage`/
+  `wait`/`waitForSelector`). `type` documente explicitement qu'il doit rester une frappe
+  caractère-par-caractère (`page.locator().pressSequentially`), jamais `page.fill` — c'est
+  précisément la raison d'être de ce node face à `http`. `retryPolicy` est **omis du schéma** via
+  `.omit({ retryPolicy: true }).strict()` (pas juste laissé optionnel) : le moteur rejoue
+  l'exécuteur entier en cas de retry, ce qui rejouerait toute la séquence — y compris un clic
+  "soumettre" déjà réussi. `.strict()` est ce qui rend cet omission réellement bloquante plutôt que
+  cosmétique (sans lui, `z.object` accepterait puis ignorerait silencieusement un `retryPolicy`
+  fourni malgré tout). `LoopBodyNodeSchema` ne l'inclut pas non plus (scope cut explicite — voir
+  son propre commentaire).
+- **`apps/browser-worker`** : nouvelle route `POST /session/run` (module `src/session/`), calquée
+  sur `/render` existant. **Lance son propre navigateur Chromium dédié par appel**, plutôt que de
+  réutiliser le singleton partagé de `RenderService` : cette route peut être longue (plusieurs
+  étapes) et est appelée par de vraies exécutions, potentiellement sans surveillance — la coexistence
+  avec l'outil de preview interactif sur un seul processus navigateur aurait dilué la garantie
+  d'isolation qui est la raison d'être même de ce service. Coût accepté : un lancement Chromium par
+  appel (~1-2s).
+- **Garde-fou SSRF** (`ssrfGuard.ts`, nouveau) sur cette route (et sur chaque step `navigate`) :
+  résout la cible et rejette (400) une adresse privée/loopback/link-local, sauf allowlist explicite
+  via `BROWSER_WORKER_SSRF_ALLOWLIST`. Justifié spécifiquement pour ce node (pas pour `/render`,
+  volontairement non retouché) : `startUrl`/`navigate.url` sont interpolés depuis des données
+  potentiellement issues du scraping lui-même, et ce node peut tourner sans surveillance via le
+  scheduler — un vrai navigateur qui **exécute le JS** d'une cible interne est un risque plus large
+  qu'un simple fetch HTTP. Explicitement best-effort (plages courantes seulement, pas le registre
+  IANA complet) et ne protège pas contre une redirection vers une cible privée après coup.
+- **`packages/workflow-core`** : `browserActionExecutor.ts`, calque direct de `httpExecutor.ts` —
+  interpole `startUrl` et chaque champ templaté de `steps`, un seul appel HTTP batch vers
+  `browser-worker` (jamais via `apps/api` : exactement comme `httpExecutor` ne passe jamais par
+  `apps/api` non plus). `engine.ts` gagne un accesseur `getRetryPolicy(node)` dédié, nécessaire
+  parce qu'un accès direct à `node.retryPolicy` ne type-check plus une fois qu'un membre de l'union
+  (`browserAction`) n'a plus ce champ du tout.
+- **Frontend** : inspecteur dédié (liste d'actions éditable, calque du patron
+  `TextCryptoNodeInspector.tsx`) enregistré sur tous les points d'extension habituels
+  (`nodeStyles.ts`, `NodePalette.tsx`, `WorkflowNode.tsx`, `NodeInspectorPanel.tsx`,
+  `workflowGraph.ts`) — sans encore de bouton de preview live (Phase C, à venir).
+- **`docker-compose.yml`/`docker-compose.dev.yml`** : `worker` gagne `BROWSER_WORKER_URL` (déjà
+  présent sur `api` depuis l'itération 8) — c'est désormais lui, pas seulement `api`, qui a besoin
+  de joindre `browser-worker`.
+
+**Vérifié** : tests Zod du nouveau schéma (dont le rejet de `retryPolicy`) ; tests unitaires du
+garde-fou SSRF (adresses privées v4/v6, allowlist) ; `browserActionExecutor.test.ts` (interpolation,
+appel HTTP, propagation d'erreur) contre un vrai serveur HTTP fixture ; nouveau
+`apps/browser-worker/test/session.e2e.test.ts` contre un vrai Chrome (frappe + clic réels, suivi
+d'un `navigate`, rejet SSRF, sélecteur introuvable) ; suite complète du monorepo rejouée sans
+régression (`pnpm turbo run build typecheck lint test`, 35/35 puis 18/18 tâches réussies).
+
+### Deux bugs réels trouvés et corrigés après la livraison initiale de la Phase A
+
+Signalés par l'utilisateur ("le node n'enregistre pas les propriétés") — pas un problème Docker/
+config, deux bugs distincts dans `BrowserActionNodeInspector.tsx`, tous deux couverts par de
+nouveaux tests de composant (premiers de ce type dans ce dépôt — aucun inspecteur n'en avait avant) :
+
+1. Le step par défaut d'un nouveau node/d'une nouvelle action (`{ type: "click", selector: "" }`)
+   n'était pas valide (sélecteur vide) — or la sauvegarde exige que **toutes** les actions soient
+   valides avant d'écrire quoi que ce soit, y compris le nom ou l'URL de départ (même patron que
+   `TextCryptoNodeInspector`). Un node fraîchement créé ne sauvegardait donc littéralement rien
+   jusqu'à ce que ce premier champ soit rempli. Corrigé en changeant ce step par défaut pour `wait`
+   (`workflowGraph.ts`'s `createDefaultNode`, et le bouton "+ ajouter une action") — le seul type de
+   step valide sans qu'aucun champ texte soit rempli.
+2. Plus subtil : même après (1), un node dont l'état de départ était déjà invalide (ex. un node
+   créé avant ce correctif) ne se sauvegardait toujours pas une fois l'utilisateur corrigeait le
+   champ manquant. Cause : le garde-fou anti-doublon (`lastSentRef`, censé éviter un appel `onChange`
+   parasite au montage) ne s'initialisait qu'au premier *parse réussi* — si ce premier succès
+   survient à cause d'une vraie modification (et non au montage), il était avalé à tort comme s'il
+   s'agissait juste de l'écho initial. Corrigé en initialisant `lastSentRef` directement avec le
+   node reçu en prop, plutôt qu'avec `null` en attendant le premier succès.
+
+### Actions supplémentaires pour simuler un comportement humain (à la demande explicite de l'utilisateur)
+
+Trois ajouts aux steps de `BrowserActionStepSchema`, tous rejouables avec un délai qui peut être
+**aléatoire** (tiré à nouveau à chaque exécution, via un nouveau `DelaySpecSchema` partagé — `{kind:
+"fixed", ms}` ou `{kind: "random", minMs, maxMs}`) plutôt que fixe, précisément parce qu'un délai
+identique à chaque rejeu ne lit pas comme humain :
+
+- `moveMouse` (`x`, `y`, `delay?`) — déplace la souris vers une position absolue de la fenêtre.
+- `moveMouseRandom` (`delay?`) — déplace la souris vers une position aléatoire de la fenêtre
+  visible (jitter d'inactivité, sans viser un élément précis).
+- `type` : son délai inter-frappe (`delayMs: number` avant) devient `delay?: DelaySpec` — un délai
+  `"random"` ici n'a pas d'équivalent natif dans Playwright (`pressSequentially` n'accepte qu'un
+  seul délai constant), donc ce cas précis tape caractère par caractère à la main
+  (`page.keyboard.type`) avec une pause ré-échantillonnée après chacune, plutôt que de déléguer à
+  `pressSequentially`.
+
+Les deux nouveaux steps de déplacement utilisent `page.mouse.move(x, y, { steps: 15 })` (pas 1, le
+défaut Playwright) pour produire un déplacement visuellement progressif plutôt qu'un saut instantané
+— une constante interne, pas un champ exposé à l'utilisateur (hors périmètre de la demande).
+
+**Vérifié** : tests Zod (dont le rejet d'un `DelaySpec` random avec `maxMs < minMs`) ;
+`browserActionExecutor.test.ts` (les nouveaux champs sont bien numériques/structurels, jamais
+interpolés) ; `session.e2e.test.ts` contre un vrai Chrome (position de souris exacte confirmée via
+un `mousemove` écouté côté page fixture, frappe à délai aléatoire produisant toujours le texte
+correct) ; 8 nouveaux tests de composant pour la nouvelle UI de délai (fixe/aléatoire) sur les
+trois steps concernés. `pnpm turbo run build typecheck lint test` rejoué sans régression (46/46).
+
+### Un vrai bug produit trouvé — aucun moyen de choisir le nœud de départ d'un workflow
+
+Signalé par l'utilisateur ("j'ai branché un browserAction à un Stop mais seul le Stop est
+exécuté") — **pas un bug du node `browserAction` en particulier** : un workflow tout juste créé
+démarre toujours comme un unique nœud `stop` (`ProjectDetailPage.tsx`'s `handleCreateWorkflow`,
+`startNodeId: "stop1"`), et **rien dans l'éditeur ne permettait de désigner un autre nœud comme
+point de départ** — ajouter un nœud, ou le relier par une flèche, ne touchait jamais
+`startNodeId`. Un `browserAction` câblé en amont de `stop1` restait donc bien branché visuellement,
+mais jamais atteint : le moteur démarre à `startNodeId`, et un nœud `stop` interrompt le parcours
+avant même de regarder ses arêtes sortantes (`engine.ts`) — aucune notion de "regarder les arêtes
+entrantes" ou "exécuter tout `definition.nodes`" n'existe. `validateDefinition` ne vérifie que la
+présence des ids référencés, jamais l'atteignabilité — un nœud orphelin ou mal câblé passe la
+validation et s'exécute silencieusement sans jamais tourner.
+
+Corrigé par deux ajouts, tous deux nouveaux dans l'éditeur :
+- **Désigner le nœud de départ** : nouvel item "Définir comme nœud de départ" dans le menu
+  contextuel (`NodeContextMenu.tsx` ; affiché "✓ Nœud de départ", non cliquable, sur le nœud déjà
+  désigné), et un badge visuel "▶ Départ" sur ce nœud (`WorkflowNode.tsx`). `startNodeId` migre
+  de "lu directement depuis la définition chargée, jamais modifiable" vers un champ mutable de
+  `useEditorStore` (même patron que `selectedNodeId`) — c'est ce qui permet à `WorkflowNode` de le
+  lire directement pour son badge, sans le faire transiter par les props `data` de chaque node
+  React Flow. Supprimer le nœud de départ réassigne automatiquement un autre nœud restant
+  (`reassignStartNodeId`, `lib/workflowGraph.ts`) plutôt que de laisser un `startNodeId` pendant
+  qui casserait la validation au prochain enregistrement.
+- **Garde-fou avant exécution** : "Exécuter" calcule désormais (`findUnreachableNodeIds`,
+  BFS depuis `startNodeId` sur les arêtes actuelles — la même logique que celle qu'`autoLayout`
+  utilise déjà pour placer les nœuds orphelins, extraite ici) et avertit (confirmation, non
+  bloquant) si des nœuds ne seront jamais exécutés depuis le nœud de départ actuel — pour que ce
+  cas précis ne redevienne plus jamais silencieux.
+
+**Vérifié** : 4 tests unitaires purs pour `reassignStartNodeId`/`findUnreachableNodeIds` (dont le
+scénario exact du bug rapporté : `browserAction1 -> stop1` avec `startNodeId = "stop1"`) ;
+`nodeContextMenu.e2e.test.ts` étendu contre un vrai Firefox — désigne un nœud comme départ, confirme
+le badge et le nouvel état du menu contextuel ; `workflow.e2e.test.ts` mis à jour (accepte
+désormais la boîte de dialogue de confirmation, puisque son propre workflow de test avait
+toujours ce défaut précis — sans jamais le vérifier). `pnpm turbo run build typecheck lint test`
+(46/46) puis la suite e2e navigateur rejouées sans régression (hors `preview.e2e.test.ts`, déjà
+documenté itération 8 comme incompatible avec la stack containerisée pour une raison sans rapport).
+
+### Un vrai bug d'environnement trouvé — schéma partagé resté en mémoire côté `api`/`worker`
+
+Signalé par l'utilisateur ("l'enregistrement ne fonctionne pas sur certaines actions") après les
+ajouts `moveMouse`/`moveMouseRandom`/`delay`. Un balayage exhaustif des 13 variantes de step de
+l'inspecteur (nouveaux tests de composant, un par type + un scénario multi-étapes) n'a rien trouvé
+côté formulaire — chacune se sauvegarde correctement isolément. Reproduit directement contre l'API
+réelle (`curl` avec un node `browserAction` contenant un step `moveMouse`) : rejeté avec
+`invalid_union_discriminator`, alors que le schéma sur disque accepte bien ce type.
+
+Cause : `docker compose ps` montrait `api`/`worker` `Up 2 hours`, sans redémarrage depuis avant ces
+ajouts au schéma. `nest start --watch` (`api`) et `tsx watch` (`worker`) ne surveillent que leur
+propre `src/`, jamais le `dist/` d'un package workspace dont ils dépendent
+(`packages/workflow-types`) — le fichier compilé est bien à jour sur disque (montage en direct),
+mais le process déjà démarré garde en mémoire le schéma chargé à SON propre démarrage
+(`require`/`import` ne relit jamais un module déjà chargé). Les variantes déjà présentes AVANT ces
+ajouts continuaient donc à s'enregistrer normalement ; seules les nouvelles (`moveMouse`,
+`moveMouseRandom`, `type.delay`) étaient rejetées — exactement le symptôme "certaines actions".
+
+Corrigé par un simple `docker compose restart api worker` (aucun rebuild d'image nécessaire) ; la
+même requête `curl` accepte ensuite les trois nouveaux steps. Documenté dans le README comme un
+troisième cas, distinct des deux autres pièges Docker déjà notés (image jamais reconstruite / mode
+production sans montage) : modifier un package partagé pendant qu'un service qui en dépend tourne
+déjà nécessite un `restart` de ce service, sans quoi son schéma en mémoire reste silencieusement
+périmé malgré des fichiers à jour sur disque.
+
+## Variables de sortie affichées + autocomplétion `{{ }}` (à la demande explicite de l'utilisateur)
+
+Deux ajouts liés, pour rendre le chaînage des nodes moins dépendant de la mémoire/de la
+documentation :
+
+- **Panneau d'inspection** (`NodeInspectorPanel.tsx`) : affiche désormais, pour **tout** type de
+  node, la liste de ses références `{{ }}` valides une fois qu'il a tourné — pas seulement
+  `actions.<id>.output`, mais chacun de ses sous-champs statiquement connus (`http` →
+  `.status`/`.headers`/`.body` ; `browserAction` → `.status`/`.html` ; `stop` →
+  `.stopped`/`.reason` ; `extract` → un sous-champ par nom de règle **configurée sur ce node** ;
+  aucun sous-champ connu pour `condition`/`dataTransform`/`textCrypto`/`loop`, qui n'affichent que
+  la référence de base). `setVariable` est un cas à part : affiche `workflow.<clé>` — la
+  convention que ce dépôt utilise déjà partout (voir `setVariableExecutor.ts` : chaque clé finit
+  dans `ctx.variables.workflow`), pas le générique `actions.<id>.output.<clé>` qui marcherait
+  aussi mais introduirait une deuxième façon, non conventionnelle, de lire la même valeur. Un
+  clic copie la référence complète (`{{ ... }}`) dans le presse-papiers.
+- **Autocomplétion** (`TemplateInput.tsx`, nouveau) : tout champ `{{ }}` de l'éditeur (URL/en-
+  têtes/paramètres/corps HTTP, `startUrl` et les champs textuels de chaque action du node
+  Navigateur, la donnée source de Traitement/Crypto, les valeurs de Variables, la source d'une
+  Boucle) affiche désormais une liste déroulante filtrée dès que l'utilisateur tape `{{` —
+  reprend exactement la même liste de références que ci-dessus, pour chaque node du graphe, plus
+  `global.<clé>` pour chaque variable globale déclarée sur le projet, plus (uniquement à
+  l'intérieur du corps d'une Boucle) `item`/`runtime.index`/`runtime.isFirst`/`runtime.isLast`.
+  Techniquement : un `<input>`/`<textarea>` toujours enregistré normalement via
+  `register(name)` de react-hook-form (aucun champ n'est devenu "contrôlé") — l'insertion d'une
+  suggestion passe par le même mécanisme que les extensions de navigateur/outils d'automatisation
+  utilisent pour simuler une vraie frappe sur un champ non contrôlé (le setter natif de
+  `HTMLInputElement.prototype.value`, puis un événement `input` synthétique), puisque
+  `registration.onChange` ne réagit jamais à une simple mutation d'état React.
+- **Périmètre volontairement pas couvert** : le champ `expression` du node Condition (une
+  expression JS-like évaluée directement, jamais un template `{{ }}` — voir
+  `evaluateCondition`) ; les champs de règle d'Extraction (sélecteurs/nom/attribut — utilisés
+  comme littéraux, jamais interpolés) ; le `source` d'Extraction lui-même, qui est déjà un
+  `<select>` d'ids de nodes existants, pas un champ texte.
+
+**Vérifié** : 18 tests unitaires purs pour `lib/templateVariables.ts` (dont le scénario exact
+`browserAction1`/`http1` avec sous-champs, et le cas `setVariable` → `workflow.<clé>`) ; 7 tests de
+composant pour `TemplateInput` (ouverture sur `{{`, filtrage, fermeture, insertion, navigation
+clavier, mode `textarea`) ; nouveau test e2e navigateur réel
+(`templateAutocomplete.e2e.test.ts`) — tape `{{ coun` dans le champ URL d'un node HTTP, voit
+`workflow.count` proposé (défini par un node Variables ajouté juste avant), clique, confirme
+`{{ workflow.count }}`. `nodeContextMenu`/`workflow`/`loopNode.e2e.test.ts` rejoués sans
+régression — `loopNode.e2e.test.ts` a dû être ajusté : son XPath supposait le champ "Source"
+directement adjacent à son `<label>`, une hypothèse cassée par le nouveau `<div>` d'enrobage de
+`TemplateInput`. `pnpm turbo run build typecheck lint test` (46/46).
+
+### Un vrai bug trouvé en testant l'affichage des variables : `stopExecutor.ts` n'interpolait jamais `reason`
+
+Signalé par l'utilisateur, qui avait mis `{{ actions.browserAction1.output.html }}` dans le
+`reason` d'un node Stop et voyait cette chaîne littérale dans le résultat d'exécution au lieu de la
+vraie valeur. Cause : contrairement à **tous** les autres exécuteurs (`httpExecutor.ts`'s `url`,
+`dataTransformExecutor.ts`/`textCryptoExecutor.ts`'s `input`, `setVariableExecutor.ts`'s valeurs,
+`browserActionExecutor.ts`'s champs de step), `stopExecutor.ts` renvoyait `node.reason` tel quel,
+sans jamais appeler `interpolate()`. Passé inaperçu depuis la toute première itération : `reason`
+est optionnel et le plus souvent une simple étiquette statique ("quota dépassé"), donc ce chemin
+n'était jamais exercé avec un `{{ }}` réel jusqu'ici.
+
+Corrigé (`interpolate(node.reason, ctx.expressionContext())` quand `reason` est défini) ; 4
+nouveaux tests unitaires (premiers de ce fichier — `stopExecutor.ts` n'en avait aucun avant) dont
+le scénario exact rapporté. Vérifié aussi contre la vraie stack : `packages/workflow-core`
+reconstruit, conteneur `worker` redémarré (même piège que celui déjà documenté plus haut — un
+package partagé modifié pendant qu'un service qui en dépend tourne déjà), puis un workflow réel
+`setVariable → stop` exécuté via `curl` confirmant `"reason": "hello world"` (pas le `{{ }}`
+littéral) dans le résultat.
+
+## Itération 10 — Node Navigateur : preview live + enregistreur d'actions (Phases B/C, livrée)
+
+Complète l'itération 9 : la moitié "batch" (Phase A) était livrée, restaient la preview live du
+navigateur piloté et un bouton "Enregistrer" qui capture automatiquement les interactions réelles
+de l'utilisateur comme actions du node — les deux à la demande explicite de l'utilisateur d'origine
+("mets en place le prévisualisateur et l'enregistreur d'actions comme c'était prévu à la base").
+Ceci **lève formellement** l'entrée "WebSocket temps réel" (§17.12) de la section hors périmètre
+ci-dessous, pour ce cas d'usage précis (streaming vidéo + relais d'actions) — pas un transport
+WebSocket générique pour le reste de l'UI (exécutions/logs restent en polling, inchangé).
+
+### Phase B — `candidateSelectors` extrait en module partagé, testé une seule fois
+
+Le bouton "Enregistrer" doit calculer un sélecteur pour l'élément avec lequel l'utilisateur
+interagit — exactement la même logique que `candidateSelectors(el)` de `htmlSandbox.ts` (jusqu'ici
+une chaîne JS dupliquée, injectée dans l'iframe sandboxée de la preview HTML), mais désormais
+nécessaire une seconde fois dans une vraie page pilotée par Playwright. Plutôt que dupliquer une
+seconde copie qui aurait divergé silencieusement avec le temps, nouveau package
+`packages/browser-scripts` : une **unique fonction auto-contenue** (tous les helpers en fonctions
+imbriquées, aucune fermeture externe), testée directement (vitest + jsdom), puis réutilisée aux
+deux endroits en l'injectant via `` `(${candidateSelectors.toString()})` `` — `htmlSandbox.ts`
+remplace son bloc dupliqué par cet appel ; `apps/browser-worker`'s script d'enregistrement (Phase C
+ci-dessous) fait de même. Valide tant que la fonction reste sans fermeture externe : vérifié par un
+test round-trip dédié (`new Function('return (' + fn.toString() + ')')()`) et en inspectant le
+bundle Vite de production réel — la minification renomme la variable englobante mais n'affecte
+jamais le code source que `.toString()` capture, puisque `${fn.toString()}` s'évalue à l'exécution.
+
+### Phase C — transport WebSocket, screencast CDP, enregistreur, preview frontend
+
+- **Transport** : aucune infra WebSocket n'existait dans ce monorepo. Nouvelle dépendance
+  `@fastify/websocket@^10` (compatible fastify v4 déjà en place — la v11 cible fastify v5) sur
+  `apps/browser-worker` **et** `apps/api`, enregistrée via un petit provider (`OnModuleInit`
+  injectant `HttpAdapterHost`, `fastify.register(...)` puis `fastify.get(path, {websocket:true},
+  handler)`) plutôt qu'un décorateur `@nestjs/websockets` — cohérent avec le reste de `tools`, qui
+  utilise déjà des contrôleurs Fastify simples.
+- **`apps/browser-worker` — `GET /session/live`** (`session-live.gateway.ts`) : par connexion,
+  `assertPublicTarget` sur l'URL de départ (même garde-fou SSRF que la Phase A), navigateur
+  **dédié** (même raisonnement d'isolation qu'en Phase A), puis screencast CDP
+  (`Page.startScreencast`/`screencastFrame`/`screencastFrameAck` — choisi plutôt qu'un polling
+  `page.screenshot()` : push, pas de compromis latence/CPU à deviner) relayé en JPEG base64 ; les
+  messages entrants (`mouseMove`/`mouseDown`/`mouseUp`/`wheel`/`keyDown`/`keyUp`) sont rejoués via
+  `page.mouse`/`page.keyboard` (API haut niveau Playwright, pas les commandes CDP `Input.dispatch*`
+  brutes) ; `startRecording`/`stopRecording` activent/désactivent un script d'enregistrement
+  (`recorderScript.ts`, injecté via `page.addInitScript`, ré-armé à chaque navigation puisqu'un
+  clic qui charge une page suit un script par défaut désactivé) qui détecte clic/sélection/frappe
+  (débouncée jusqu'au `blur`) et calcule un sélecteur via `candidateSelectors` (Phase B) — chaque
+  step recomposé est validé côté serveur contre `BrowserActionStepSchema` avant d'être relayé
+  (rejeté et journalisé, jamais fatal, en cas d'échec). Une file d'attente promesse-chaînée
+  (`enqueue`) garantit un traitement strictement FIFO des messages entrants malgré des appels
+  Playwright asynchrones concurrents (rafales de `mousemove`). Nettoyage systématique
+  (`context.close()`, jamais juste `page.close()`) sur `close`/`error` du WS, y compris déconnexion
+  brutale — jamais de session Playwright orpheline.
+- **`apps/api` — relais `GET /tools/session-live`** (`SessionLiveProxyGateway`) : ouvre sa **propre**
+  connexion WS cliente vers `browser-worker` par connexion entrante, relaie dans les deux sens, et
+  **propage le cycle de vie** (fermer un côté ferme explicitement l'autre — pas juste un relais de
+  messages, sinon une session `browser-worker` orpheline persisterait indéfiniment). Garde intact
+  l'invariant existant : le frontend ne parle jamais directement à `browser-worker` (qui reste
+  `expose`-only dans `docker-compose.yml`, jamais `ports`).
+- **Frontend** (`BrowserSessionPreview.tsx`, nouveau) : dessine chaque frame JPEG sur un
+  `<canvas>`, capture pointeur/clavier dessus, convertit les coordonnées canvas → viewport distant
+  réel (`scaleX = canvas.width / rect.width`, etc., puisque la résolution interne du canvas — celle
+  du viewport distant — diffère en général de sa taille affichée). "Enregistrer" bascule
+  `startRecording`/`stopRecording` ; chaque action reçue s'accumule dans une liste locale (même
+  patron "accumuler puis valider" que `PreviewSelector.tsx`) avant fusion dans `node.steps` via
+  `onChange`, une fois "Valider (N actions)" cliqué. Bouton d'ouverture ajouté dans
+  `BrowserActionNodeInspector.tsx`.
+
+**Vérifié** : 9 tests unitaires (`packages/browser-scripts`, jsdom) ; 5 tests e2e
+(`apps/browser-worker/test/session-live.e2e.test.ts`) contre un **vrai Chrome** via un vrai client
+`ws` (streaming de frame, enregistrement d'un clic et d'une frappe débouncée au blur, rejet SSRF,
+erreur avant `start`) — `.inject()` (utilisé par toute autre suite e2e de ce dépôt) ne peut pas
+faire d'upgrade WebSocket, d'où un nouveau helper `test/support/liveApp.ts` avec un vrai
+`app.listen(0)` ; 4 tests e2e (`apps/api/test/session-live.e2e.test.ts`) contre un **faux**
+upstream (`WebSocketServer`) — relais dans les deux sens, message mis en file avant l'ouverture de
+la connexion amont, fermeture propagée dans les deux sens ; 7 tests de composant
+(`BrowserSessionPreview.test.tsx`, WebSocket global mocké) ; un test d'intégration dans
+`BrowserActionNodeInspector.test.tsx` (une action validée depuis la preview atterrit bien dans les
+steps du node). Vérification bout en bout supplémentaire contre la **vraie stack Docker** : client
+`ws` direct sur `ws://localhost:3001/tools/session-live` → chaîne complète api → browser-worker →
+vrai Chrome → `https://example.com`, frame JPEG reçue ; même client contre une cible privée
+(`http://127.0.0.1:3001`) rejeté par le garde-fou SSRF avec le message d'erreur attendu. 590 tests
+Vitest au total dans le monorepo.
+
+### Deux bugs d'environnement Docker trouvés en vérifiant la stack de dev, plus un vrai bug de typage
+
+1. **`nest build`/`nest start --watch` échouaient sur `apps/browser-worker`** (`TS6059`) :
+   `tsconfig.build.json` fixe `rootDir: "src"` mais son `exclude` ne listait que `**/*.test.ts` —
+   le nouveau `test/support/liveApp.ts` (un vrai fichier `.ts`, pas un test) reste donc inclus par
+   le motif par défaut `**/*` tout en étant hors de `rootDir`. `pnpm typecheck` (`tsc --noEmit`,
+   sans `-p`) utilise le `tsconfig.json` de base, sans `rootDir`, donc ne voyait jamais cette
+   erreur — seul `nest build`/`nest start --watch` (qui utilisent `tsconfig.build.json` par
+   convention Nest) la déclenchait. Corrigé en ajoutant `"test"` à l'`exclude` de
+   `tsconfig.build.json` — n'affecte pas la couverture de `pnpm typecheck` sur les fichiers de
+   test, qui passe par l'autre fichier.
+2. **"Connexion perdue avec le service de navigation" en preview**, rapporté par l'utilisateur
+   après plusieurs heures avec les conteneurs de dev déjà démarrés. Cause, en deux temps :
+   le volume anonyme `node_modules` d'`api` n'avait en réalité jamais reçu de client Prisma généré
+   (`node_modules/.prisma/client` absent), et celui de `browser-worker` n'avait pas le lien de
+   workspace vers le tout nouveau `@datarover/browser-scripts` (Phase B) — un écart resté invisible
+   pendant des heures parce que `nest start --watch` continue de servir son dernier build réussi
+   tant qu'aucun changement de fichier ne force une recompilation ; c'est un changement sans
+   rapport (nettoyage d'un `dist/` pendant cette vérification) qui a déclenché la recompilation qui
+   a fait apparaître les deux (`api` : 62 erreurs `PropertyDoesNotExistOnPrismaService` ; `browser-
+   worker` : `@datarover/workflow-types`/`@datarover/browser-scripts` introuvables). Corrigé sans
+   reconstruire l'image : `pnpm install --frozen-lockfile` **à l'intérieur** de chaque conteneur déjà
+   démarré (régénère le client Prisma et les liens de workspace manquants), puis un simple
+   `docker compose restart browser-worker` — nécessaire séparément, parce que `tsc --watch` ne
+   réinvalide pas une résolution de module déjà échouée simplement parce qu'un lien symbolique vient
+   d'apparaître sur disque après coup. Aucune perte de données (volumes nommés Postgres/Redis,
+   jamais concernés par un volume anonyme) : le projet de démonstration créé plus tôt dans la
+   session était toujours présent après coup.
+3. **Un vrai bug de typage trouvé en rejouant `pnpm turbo run build typecheck lint test` en une
+   seule passe combinée** (jamais fait comme telle jusqu'ici pour cette itération, seulement
+   package par package) : `BrowserSessionPreview.test.tsx` indexait `removeButtons[0]` sans garde,
+   invalide sous `noUncheckedIndexedAccess` (actif dans `tsconfig.base.json`) — invisible via
+   `vitest run` seul (les tests passent, esbuild ne type-check pas), seul `tsc --noEmit` le
+   détecte. Corrigé par une assertion non-nulle explicite (`removeButtons[0]!`), le même style déjà
+   utilisé pour ce cas précis dans `packages/workflow-core/src/retry.test.ts`.
+
+### Un vrai bug produit trouvé — la preview restait bloquée sur "Connexion perdue" malgré une session qui fonctionnait
+
+Signalé par l'utilisateur sur un site réel (`chronocarpe.com/fr`) après que les deux incidents
+Docker ci-dessus ont été écartés un par un (conteneurs stables 25 minutes, healthcheck vert, et la
+requête WS confirmée en 101 Switching Protocols dans l'onglet Réseau de Firefox lui-même — donc pas
+un problème serveur). Cause, une fois le serveur mis hors de cause : `apps/web` charge
+`BrowserSessionPreview` sous `React.StrictMode` (`main.tsx`) — en dev, React monte l'effet qui
+ouvre le WebSocket, le nettoie, puis le remonte immédiatement une seconde fois. Le **premier**
+socket se fait fermer par ce cleanup avant que son handshake ait forcément fini de son point de vue
+navigateur, ce qui déclenche un `error`/`close` asynchrone, un peu plus tard, sur cette instance
+déjà abandonnée — exactement les deux messages que Firefox affichait dans sa console. Le
+gestionnaire `error` de ce composant mettait `errorMessage` à jour sans se demander si le socket
+concerné était encore celui de l'effet en cours — et rien ne le réinitialisait ensuite : le
+**second** socket (le vrai, celui qui survit) continuait de recevoir ses frames normalement, mais
+l'UI restait bloquée à vie sur le message d'erreur du premier, jamais nettoyé.
+
+Corrigé par un drapeau `cancelled` capturé par fermeture à chaque invocation de l'effet (pas une
+ref partagée entre invocations) : chacun des quatre gestionnaires d'événements du socket (`open`/
+`message`/`close`/`error`) sort immédiatement si son propre effet a déjà été nettoyé — le patron
+React standard pour ce cas précis de double-montage. Nouveau test
+(`BrowserSessionPreview.test.tsx`) qui rend le composant sous un vrai `<StrictMode>`, confirme bien
+deux instances de socket créées, ouvre/alimente la seconde normalement (`ready`, viewport), puis
+déclenche un `error` tardif sur la première (déjà abandonnée) — et vérifie que "Connexion perdue"
+ne s'affiche jamais. `pnpm turbo run typecheck lint test --filter=@datarover/web` (119/119, +1)
+sans régression. Correctif livré uniquement dans `apps/web` (aucun changement serveur) : visible
+immédiatement via le rechargement à chaud de Vite, sans redémarrage de conteneur.
+
+### Défilement impossible dans la preview + enregistreur trop partiel — étendu à la demande explicite de l'utilisateur
+
+Signalé par l'utilisateur : "on ne peut pas faire défiler les pages" et "il ne prend pas en compte
+tous les événements, frappe clavier, déplacement souris, attente". Deux lacunes réelles,
+distinctes, dans ce qui avait été livré ci-dessus :
+
+- **Molette non relayée** : le protocole (`liveMessages.ts`'s `"wheel"`) et le côté serveur
+  (`page.mouse.wheel`) existaient déjà, mais `BrowserSessionPreview.tsx` n'attachait jamais
+  d'écouteur `wheel` sur le canvas — personne n'envoyait jamais ce message. Corrigé par un
+  écouteur natif (`canvas.addEventListener("wheel", ..., { passive: false })`), pas la prop JSX
+  `onWheel` : React rend ses écouteurs `wheel`/tactiles passifs par défaut, ce qui rend
+  `preventDefault()` silencieusement inopérant — nécessaire ici pour empêcher le défilement
+  d'atterrir sur le propre conteneur (`overflow-auto`) de l'aperçu plutôt que sur la page distante.
+- **Enregistreur limité à clic/sélection/frappe** (`recorderScript.ts`) : il manquait la frappe de
+  touches isolées (Entrée/Tab/Échap/flèches/Origine/Fin/Page haut/Page bas — un `press` en dehors
+  de tout champ texte), le défilement de la page (`scrollPage`, débounced sur `scroll` comme
+  `type` l'est déjà sur `blur`, plutôt qu'un step par tick), et le survol volontaire
+  (`hover`, seulement après un temps de pause au-dessus du seuil `HOVER_DWELL_MS`, jamais sur un
+  simple passage). Ajoutés au script, tous les trois testés contre un vrai Chrome.
+- **Aucun rythme entre actions rejouées** : chaque step réel de l'utilisateur était déjà séparé
+  d'un délai réel (le temps de réflexion, de lecture, …), jamais restitué au rejeu — une séquence
+  produite par l'enregistreur donnait donc des actions instantanées les unes après les autres,
+  contrairement à `moveMouse`/`type`'s propre délai humain (itération 9). Corrigé côté serveur
+  (`SessionLiveGateway.handleRecordedStep`) : un step `wait` est automatiquement inséré devant
+  chaque action recomposée dès que l'écart avec la précédente dépasse `AUTO_WAIT_MIN_MS` (400 ms —
+  sous ce seuil, c'est juste du bruit de latence, pas une vraie pause), plafonné à
+  `AUTO_WAIT_MAX_MS` (15 s — l'utilisateur qui s'est éloigné, pas une pause à rejouer telle
+  quelle). Réinitialisé à chaque `startRecording`, pour que la toute première action d'une session
+  n'hérite jamais d'un délai mesuré depuis un instant qui n'a rien à voir avec le rythme réel de
+  l'utilisateur.
+
+**Un vrai bug trouvé en écrivant les tests de `hover`** : le tout premier jet enregistrait un
+`hover` sur `<body>`/`<html>` chaque fois que le curseur restait simplement immobile n'importe où
+sur la page au-delà du seuil de pause — y compris juste après n'importe quelle autre action, le
+curseur étant *toujours* au repos sur l'un des deux dès qu'il n'est pas sur un élément plus petit.
+Corrigé en excluant explicitement `document.body`/`document.documentElement` de la détection de
+survol — un test dédié (`"never records a 'hover' for resting on the empty page background"`) le
+couvre désormais.
+
+**Un vrai bug trouvé en écrivant le test du rythme automatique** : le `wait` et l'action qu'il
+précède arrivent synchrones, dans le même tick — un enchaînement de `waitForMessage` à usage
+unique (un par étape attendue, motif déjà utilisé partout ailleurs dans ce fichier de test) rate
+le second message : son propre écouteur ne s'enregistre qu'après que le premier `await` se soit
+entièrement résolu via la microtask queue, ce qui arrive *après* que le serveur ait déjà émis (et
+perdu, faute d'auditeur) le second message. Corrigé en remplaçant, pour ce test précis, la
+séquence de `waitForMessage` par un unique auditeur qui accumule tout depuis avant l'envoi de
+Tab — plus de fenêtre de non-écoute entre deux messages consécutifs.
+
+**Vérifié** : `recorderScript.ts`/`session-live.gateway.ts` étendus, 10 tests e2e (5 nouveaux) dans
+`session-live.e2e.test.ts` contre un **vrai Chrome** (press isolé, scroll débounced, hover réel,
+non-hover sur `<body>`, rythme automatique) ; nouveau test de composant pour le relais de la
+molette (`BrowserSessionPreview.test.tsx`, 9 tests). Vérifié en direct contre la vraie stack Docker
+sur `chronocarpe.com/fr` : navigation, molette relayée sans erreur.
+
+Au passage, un troisième piège Docker distinct des trois déjà documentés dans le README a refait
+surface pendant cette vérification (voir README, section Docker) : `typecheck`/`lint`/`test`
+déclenchent, via `turbo.json`'s `"dependsOn": ["^build"]`, la **même** reconstruction des `dist/`
+de packages partagés que `build` lui-même — pas seulement `build`, comme documenté un peu vite la
+première fois que ce piège avait été rencontré plus haut dans cette itération.
+
+### L'enregistreur restait sourd au déplacement de souris et à la plupart des frappes clavier — demandé explicitement par l'utilisateur
+
+Malgré l'extension ci-dessus, l'utilisateur a signalé à nouveau, en termes plus précis : "il manque
+les actions de déplacement de la souris et de frappe au touche du clavier". Ceci renverse
+délibérément une décision de conception initiale de la Phase C ("jamais une trajectoire de pointeur
+brute" — voir le premier jet de `recorderScript.ts`) : l'utilisateur veut le mouvement lui-même
+comme action visible et rejouable, pas seulement son effet final (un clic, un survol).
+
+- **`moveMouse`** : `mousemove` débounced (`MOUSE_MOVE_SETTLE_MS`, 250 ms — plus court que le
+  survol/défilement : un déplacement doit sembler réactif) jusqu'à la position où le curseur se
+  stabilise, plutôt qu'un step par événement natif (des dizaines par seconde pendant un vrai
+  glissement de souris). Aucun `delay` n'est fabriqué à l'enregistrement — le mécanisme de `wait`
+  automatique (ci-dessus) couvre déjà le rythme réel entre deux actions, y compris entre deux
+  `moveMouse`.
+- **Frappe clavier élargie** : les touches spéciales déjà couvertes (`PRESS_KEYS`) restent
+  détectées où qu'elles surviennent ; **toute** autre touche (raccourcis clavier, widgets pilotés
+  au clavier sur un élément non textuel, jeu de touches sur un `<div>`, …) est désormais
+  enregistrée en `press` elle aussi, **sauf** à l'intérieur d'un champ éditable (`INPUT`/
+  `TEXTAREA`/`contenteditable`), où un caractère imprimable reste capturé uniquement par `type` —
+  l'enregistrer une seconde fois en `press` aurait dupliqué la même frappe. Les touches
+  modificatrices seules (Shift/Control/Alt/Meta/…) ne sont jamais enregistrées seules — un `press`
+  d'un modificateur isolé n'a aucun sens à rejouer.
+
+**Vérifié** : 4 nouveaux tests e2e contre un vrai Chrome (`moveMouse` débounced à la position
+finale ; frappe imprimable hors champ texte ; absence de doublon `press` pour une frappe déjà
+couverte par `type` ; le test de survol sur `<body>` étendu pour n'exclure que `hover`, plus
+seulement "aucune action", puisque `moveMouse` y apparaît désormais légitimement) — 13 tests au
+total dans ce fichier, 46/46 pour `apps/browser-worker`. Vérifié en direct contre la vraie stack
+Docker (`ws://localhost:3001/tools/session-live`, un vrai `startRecording` suivi d'un déplacement
+de souris puis d'une frappe "a") : les deux actions attendues, `moveMouse` puis `press`, reçues
+sans erreur.
+
+### Le focus clavier restait sur le node de l'éditeur, pas sur l'aperçu — la frappe n'atteignait jamais la session distante
+
+Signalé par l'utilisateur en deux temps : "il ne detect pas l'action de frappe du clavier" dans un
+champ de saisie, puis, plus alarmant, "quand j'appuie sur backspace il ne supprime pas le caractère
+tapé mais supprime le node". Pas un bug de l'enregistreur (côté `browser-worker`, déjà couvert par
+les tests ci-dessus) mais du **canvas de l'aperçu lui-même** (`BrowserSessionPreview.tsx`) : Firefox
+(contrairement à Chrome/Safari) ne donne pas automatiquement le focus clavier à un élément cliqué
+qui n'est pas un vrai champ de formulaire, même avec `tabIndex={0}`. Le focus restait donc sur le
+node de l'éditeur derrière la fenêtre — chaque frappe, Backspace compris, partait vers React Flow
+plutôt que vers le `onKeyDown` du canvas, déclenchant son raccourci intégré "Backspace supprime le
+node sélectionné" au lieu d'atteindre la session distante.
+
+Corrigé par deux mesures, l'une positive, l'autre défensive : `event.currentTarget.focus()`
+explicite dans `handleMouseDown` (ne pas compter sur le comportement par défaut du navigateur,
+inconsistant selon le navigateur) ; `event.stopPropagation()` en plus de `preventDefault()` dans
+`handleKeyDown`/`handleKeyUp` (`preventDefault()` seul n'empêche pas l'événement de continuer à se
+propager vers un raccourci global situé plus haut dans l'arbre DOM — seul `stopPropagation()` le
+fait). Deux nouveaux tests le couvrent : le focus bascule bien sur le canvas au clic, et un
+"Backspace" envoyé au canvas n'atteint jamais un écouteur `keydown` natif posé sur un ancêtre —
+reproduisant littéralement le raccourci de React Flow. 122/122 tests pour `apps/web`.
+
+### `press` ne se déclenchait toujours pas dans un champ de saisie — le compromis "déjà couvert par `type`" abandonné
+
+Une fois le focus corrigé ci-dessus, l'utilisateur a signalé une dernière fois : "il ne detecte
+toujours pas l'action press quand on est dans un champs input text". Le premier jet de `press`
+excluait délibérément les caractères imprimables **à l'intérieur** d'un champ éditable, au motif
+qu'ils étaient déjà couverts par `type` (voir plus haut) — un compromis qui, du point de vue de
+l'utilisateur, se lisait simplement comme "press ne marche pas dans les champs". Abandonné :
+`press` s'enregistre désormais pour **toute** touche, partout, y compris dans un champ de texte —
+en plus, pas à la place, du `type` agrégé au blur du champ. Seules les touches modificatrices
+seules (Shift/Control/Alt/Meta/…) restent jamais enregistrées seules. Le test qui vérifiait
+l'ancien comportement ("never records a standalone 'press' ... already covered by 'type'") est
+retourné en son contraire exact. 13/13 tests dans `session-live.e2e.test.ts`, vérifié en direct
+contre la vraie stack (une frappe "h" dans une session enregistrée → `{"type":"press","key":"h"}`
+reçu).
+
 ## Explicitement hors périmètre à ce stade
 
-- **WebSocket temps réel** (§17.12) — le moteur émet déjà des événements (`onEvent`) et le worker
-  persiste des `ExecutionLog` au fil de l'exécution ; l'UI actuelle les affiche par polling (1s),
-  pas de relais en direct.
-- **Scheduler exécutable** (§14) — les types `Schedule`/`ScheduleType` existent, mais ni table
-  Prisma, ni cron, ni endpoint, ni UI.
-- **Browser crawling / Playwright pour l'exécution des workflows** (§5, §17.9) — le moteur
-  (`packages/workflow-core`, exécuteur `http`) reste strictement HTTP (Undici). Un rendu headless
-  Playwright existe désormais, mais uniquement pour l'outil de preview interactif de l'éditeur (voir
-  itération 4, "Rendu JavaScript") — une exécution de workflow réelle ne rend jamais de JS.
+- **WebSocket temps réel pour les exécutions/logs** (§17.12) — le moteur émet déjà des événements
+  (`onEvent`) et le worker persiste des `ExecutionLog` au fil de l'exécution ; l'UI actuelle les
+  affiche toujours par polling (1s), pas de relais en direct. **Levée uniquement pour la preview
+  live du node `browserAction`** (streaming vidéo + enregistrement des actions), livrée en
+  itération 10 — un transport WebSocket dédié à ce cas d'usage précis, pas un relais générique
+  réutilisé pour les exécutions/logs.
+- **Timezone/fenêtres d'exécution/limite de concurrence/priorités pour le scheduler** (§14,
+  explicitement listées comme "évolutions futures") — le scheduler livré en itération 7 couvre le
+  strict MVP (`manual`/`interval`/`hourly`/`daily`/`weekly`/`cron`), toujours en UTC (le défaut de
+  BullMQ).
+- **Node `browserAction` dans le corps d'une boucle** — la sémantique d'une session navigateur
+  partagée ou relancée entre itérations est une vraie question de conception, volontairement
+  reportée (voir `LoopBodyNodeSchema`'s doc comment).
+- **Concurrence/scaling de `browser-worker` sous charge d'exécution** — chaque appel à
+  `/session/run` lance son propre navigateur dédié (voir itération 9 ci-dessus), sans limite de
+  concurrence globale côté service ; `worker` reste scalable (`--scale worker=3`) mais chaque
+  réplique peut solliciter `browser-worker` sans coordination entre elles.
+- **Garde-fou SSRF appliqué à `/render`** — le garde-fou de l'itération 9 protège `/session/run`
+  et (depuis l'itération 10) `/session/live` ; `/render` (outil de preview, déclenché à la main)
+  reste, comme avant, non protégé — écart identifié, pas corrigé ici.
 - **`WHILE`** (§9.5) — explicitement V2 dans le cahier des charges (§25). `FOR EACH` est livré,
   scopé, en itération 6 (node `loop` — corps intégré, pas de boucle imbriquée, voir plus haut).
 - **Sorties** Webhook/Database/CSV (§9.6) — V2 (§25).
 - **XPath** comme stratégie d'extraction — le type existe, l'exécution lève une erreur explicite
   « planned for V2 ».
-- **Credentials/Auth**, **Docker complet** (web/api/worker/browser-worker containerisés, §19-21),
-  **application Electron** (§17.3, §24) — seul un `docker-compose.yml` minimal (postgres+redis) est
-  fourni.
+- **Credentials/Auth**, **application Electron** (§17.3, §24) — seule la coquille Electron reste à
+  faire pour boucler la section 24 (MVP v1) ; Docker complet est livré (itération 8).
 - **Drag-and-drop riche, undo/redo, mise en page persistée** dans l'éditeur visuel — la position
   des nodes est recalculée à chaque chargement (voir itération 3 ci-dessus), pas sauvegardée.
 
@@ -612,9 +1315,13 @@ conséquence.
 3. ~~Preview HTML + sélection visuelle~~ — livrée (itération 4).
 4. ~~Nodes de traitement de texte + menu contextuel de l'éditeur~~ — livré (itération 5).
 5. ~~Preview JSON/XML + node Boucle~~ — livré (itération 6).
-6. **Scheduler exécutable**, puis **Docker complet** (containerisation de
-   `web`/`api`/`worker`/`browser-worker`) et **coquille Electron**, dans l'esprit de la section 24
-   (MVP v1).
+6. ~~Scheduler exécutable~~ — livré (itération 7).
+7. ~~Docker complet~~ — livré (itération 8).
+8. ~~Node Navigateur (`browserAction`), exécution batch~~ — livré (itération 9, Phase A).
+9. ~~Node Navigateur : preview live (WebSocket + screencast CDP) + enregistrement des actions~~ —
+   livré (itération 10, Phases B/C).
+10. **Coquille Electron**, dans l'esprit de la section 24 (MVP v1) — dernière pièce manquante avant
+    ce jalon.
 
 ## Comment vérifier
 
@@ -625,7 +1332,7 @@ docker compose up -d postgres redis     # ou: pnpm infra:up
 pnpm install                             # génère aussi le client Prisma
 pnpm db:migrate                          # première migration (interactif la 1ère fois : --name init)
 pnpm build
-pnpm test        # 415 tests Vitest (unitaires + intégration moteur + e2e api/worker sur vrai Postgres/Redis)
+pnpm test        # 600 tests Vitest (unitaires + intégration moteur + e2e api/worker sur vrai Postgres/Redis)
 pnpm lint
 pnpm typecheck
 
@@ -638,4 +1345,11 @@ node apps/worker/dist/main.js
 # puis, dans un 3e terminal : créer un projet, un workflow, déclencher une exécution
 # (voir le contrat API ci-dessus — POST /projects, POST /projects/:id/workflows,
 # POST /workflows/:id/executions, GET /executions/:id).
+
+# Environnement Docker complet (itération 8, §19-21) — alternative à tout ce qui précède,
+# aucune installation locale de Node/pnpm nécessaire :
+cp .env.example .env
+docker compose up --build            # web (:5173), api (:3001), worker, browser-worker, postgres, redis
+# Mode développement (hot reload) à la place :
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```

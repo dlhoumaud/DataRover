@@ -3,13 +3,12 @@ import { existsSync } from "node:fs";
 /**
  * Candidate paths for a system-installed Chrome/Chromium binary, checked in order. Mirrors
  * apps/web/e2e/support/firefox.ts's approach for the browser e2e suite: rather than have
- * `playwright-core` download and manage its own browser build (network + disk cost, and the
- * bundled Chromium build needs system libraries this environment doesn't have `sudo` to install —
- * see ARCHITECTURE.md's rendered-preview notes), we drive whatever real browser is already
- * installed on the machine.
+ * `playwright-core` download and manage its own browser build, we drive whatever real browser is
+ * already installed — a system package installed via the Dockerfile in the container image this
+ * service actually runs in production, or a locally-installed browser during plain `pnpm dev`.
  *
- * `CHROME_EXECUTABLE_PATH` lets any environment (CI, a different distro, macOS) override this
- * entirely.
+ * `CHROME_EXECUTABLE_PATH` lets any environment (Docker image, CI, a different distro, macOS)
+ * override this entirely.
  */
 const CANDIDATE_PATHS = [
   process.env.CHROME_EXECUTABLE_PATH,
@@ -24,8 +23,7 @@ const CANDIDATE_PATHS = [
 /**
  * Resolves the path to a real Chrome/Chromium executable that `playwright-core` can launch
  * directly. Returns `undefined` (rather than throwing) when nothing is found — the caller decides
- * whether that's fatal; a missing browser should only ever break the JS-rendering preview feature,
- * never the rest of the API.
+ * whether that's fatal.
  */
 export function resolveChromeBinary(): string | undefined {
   return CANDIDATE_PATHS.find((candidate) => existsSync(candidate));

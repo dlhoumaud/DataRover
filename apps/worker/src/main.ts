@@ -1,11 +1,16 @@
 import { disconnectPrismaClient } from "@datarover/database";
-import { EXECUTION_QUEUE_NAME, getRedisConnectionOptions } from "@datarover/queue";
-import type { ExecutionJobData } from "@datarover/queue";
+import {
+  EXECUTION_QUEUE_NAME,
+  SCHEDULE_TRIGGER_QUEUE_NAME,
+  getRedisConnectionOptions,
+} from "@datarover/queue";
+import type { ExecutionJobData, ScheduleTriggerJobData } from "@datarover/queue";
 import { createConsoleLogger } from "@datarover/shared";
 import type { Job } from "bullmq";
 import { Worker } from "bullmq";
 
 import { processExecutionJob } from "./processExecutionJob.js";
+import { closeScheduleTriggerResources, processScheduleTrigger } from "./processScheduleTrigger.js";
 
 const logger = createConsoleLogger("worker");
 
@@ -38,6 +43,36 @@ worker.on("error", (error: Error) => {
   logger.error(`Worker connection error: ${error.message}`);
 });
 
+/**
+ * Second, independent BullMQ Worker in this same process, consuming the ticks
+ * `ScheduleQueueService.upsertScheduler` (apps/api) registers per `Schedule` — see
+ * processScheduleTrigger.ts. Low concurrency: each tick is a couple of tiny DB reads/writes plus
+ * one enqueue, nothing that benefits from parallelism the way running a whole workflow does.
+ */
+const scheduleTriggerWorker = new Worker<ScheduleTriggerJobData>(
+  SCHEDULE_TRIGGER_QUEUE_NAME,
+  (job) => processScheduleTrigger(job.data),
+  {
+    connection: getRedisConnectionOptions(),
+    concurrency: 2,
+  },
+);
+
+logger.info(`Worker started, listening on queue "${SCHEDULE_TRIGGER_QUEUE_NAME}"`);
+
+scheduleTriggerWorker.on("completed", (job: Job<ScheduleTriggerJobData>) => {
+  logger.info(`Job ${job.id} (schedule "${job.data.scheduleId}") completed successfully`);
+});
+
+scheduleTriggerWorker.on("failed", (job: Job<ScheduleTriggerJobData> | undefined, error: Error) => {
+  const scheduleId = job?.data.scheduleId ?? "unknown";
+  logger.error(`Job ${job?.id ?? "unknown"} (schedule "${scheduleId}") failed: ${error.message}`);
+});
+
+scheduleTriggerWorker.on("error", (error: Error) => {
+  logger.error(`Schedule trigger worker connection error: ${error.message}`);
+});
+
 let shuttingDown = false;
 
 async function shutdown(signal: NodeJS.Signals): Promise<void> {
@@ -50,6 +85,8 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
 
   try {
     await worker.close();
+    await scheduleTriggerWorker.close();
+    await closeScheduleTriggerResources();
     await disconnectPrismaClient();
     logger.info("Worker shut down cleanly.");
     process.exit(0);

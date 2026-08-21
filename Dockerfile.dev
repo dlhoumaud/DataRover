@@ -1,0 +1,33 @@
+# syntax=docker/dockerfile:1
+#
+# Single, shared *development* Dockerfile (Specs.md §21 asks for exactly one `Dockerfile.dev`,
+# mirroring the production `Dockerfile`). Unlike the production image, this one does not build
+# anything — docker-compose.dev.yml bind-mounts the live repo over it and runs each service's own
+# `pnpm --filter <pkg> dev` (nest/tsx/vite watch mode), so editing a file on the host is picked up
+# immediately inside the container, exactly like running `pnpm dev` directly on the host.
+#
+# `pnpm install` still runs at image-build time (bakes a working node_modules into the image
+# itself) specifically so the *first* `docker compose -f docker-compose.yml -f
+# docker-compose.dev.yml up --build` on a completely fresh checkout doesn't depend on the bind
+# mount already containing one — docker-compose.dev.yml then shadows every node_modules directory
+# with an anonymous volume (restoring this image's own copy over whatever the bind mount would
+# otherwise put there), so a node_modules built for this image's OS/libc is never silently
+# replaced by the host's (this image is Debian/glibc specifically so that a host also running
+# Linux/glibc — the common case for this project's own dev machines — CAN still reuse the host's
+# node_modules unmodified if someone chooses to skip the anonymous-volume isolation; Alpine/musl
+# would make that substitution unsafe for any native dependency, e.g. @swc/core, esbuild, Prisma's
+# query engine).
+ARG NODE_VERSION=20-bookworm-slim
+FROM node:${NODE_VERSION}
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+# Needed for apps/browser-worker's dev process alone, but installing it in this one shared image
+# (rather than a second Dockerfile.dev.browser-worker) keeps to the "one Dockerfile.dev" ask —
+# the extra ~300MB only matters for the browser-worker container's own image layer.
+RUN apt-get update && apt-get install -y --no-install-recommends chromium openssl \
+    && rm -rf /var/lib/apt/lists/*
+ENV CHROME_EXECUTABLE_PATH=/usr/bin/chromium
+WORKDIR /app
+COPY . .
+RUN pnpm install --frozen-lockfile
+# The actual run command is supplied per-service by docker-compose.dev.yml (each service's own
+# `command:`), not baked in here — this image is generic across every app.
