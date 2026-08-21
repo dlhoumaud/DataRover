@@ -88,7 +88,7 @@ describe("definitionToFlow / flowToDefinition round trip", () => {
     // None of `definition`'s nodes were saved with a position — `definitionToFlow` fell back to
     // `autoLayout` for all of them, and `flowToDefinition` wrote that computed position straight
     // back. Structurally identical otherwise.
-    expect(rebuilt.nodes.map(({ position, ...rest }) => rest)).toEqual(definition.nodes);
+    expect(rebuilt.nodes.map(({ position: _position, ...rest }) => rest)).toEqual(definition.nodes);
     expect(rebuilt.nodes.every((node) => typeof node.position?.x === "number")).toBe(true);
     expect(rebuilt.edges).toEqual(definition.edges);
   });

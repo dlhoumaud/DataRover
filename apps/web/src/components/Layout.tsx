@@ -63,8 +63,9 @@ export function Layout({ children }: { children: ReactNode }): JSX.Element {
   return (
     <div className={`flex flex-col bg-gray-50 ${isWorkflowEditor ? "h-screen overflow-hidden" : "min-h-screen"}`}>
       <header className="flex-shrink-0 border-b border-gray-200 bg-white">
-        <div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-3">
-          <Link to="/" className="text-lg font-semibold text-gray-900 hover:text-gray-700">
+        <div className="flex w-full items-center justify-between px-4 py-3">
+          <Link to="/" className="flex items-center gap-2 text-lg font-semibold text-gray-900 hover:text-gray-700">
+            <img src="/logo-256.png" alt="" className="h-8 w-8" />
             DataRover
           </Link>
           <nav className="flex items-center gap-4">
