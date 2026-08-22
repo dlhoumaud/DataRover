@@ -2,16 +2,29 @@ import { createServer } from "node:http";
 import type { Server } from "node:http";
 import type { ExpressionContext } from "@datarover/expression-engine";
 import type { BrowserActionNode } from "@datarover/workflow-types";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { browserActionExecutor } from "./browserActionExecutor.js";
-import type { EngineVariables, NodeExecutionContext } from "./types.js";
+import type { EngineVariables, NodeExecutionContext, ProxyPoolClient } from "./types.js";
 
-function buildContext(expressionContext: ExpressionContext): NodeExecutionContext {
+function buildContext(
+  expressionContext: ExpressionContext,
+  overrides: Partial<NodeExecutionContext> = {},
+): NodeExecutionContext {
   return {
     expressionContext: () => expressionContext,
     variables: { global: {}, project: {}, workflow: {} } satisfies EngineVariables,
     actionsOutput: {},
     logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
+    ...overrides,
+  };
+}
+
+function fakeProxyPool(overrides: Partial<ProxyPoolClient> = {}): ProxyPoolClient {
+  return {
+    reserve: vi.fn(async () => ({ id: "proxy1", host: "10.0.0.5", port: 8080 })),
+    reportError: vi.fn(async () => undefined),
+    release: vi.fn(async () => undefined),
+    ...overrides,
   };
 }
 
@@ -22,6 +35,7 @@ function node(overrides: Partial<BrowserActionNode>): BrowserActionNode {
     type: "browserAction",
     startUrl: "",
     steps: [{ type: "click", selector: "#submit" }],
+    networkMode: "direct",
     ...overrides,
   };
 }
@@ -175,5 +189,68 @@ describe("browserActionExecutor", () => {
     );
 
     process.env.BROWSER_WORKER_URL = baseUrl;
+  });
+
+  describe("networkMode: 'proxy'", () => {
+    it("reserves a proxy, forwards its host/port to browser-worker, and releases it on success", async () => {
+      nextResponse = { statusCode: 200, body: { status: 200, html: "<html>ok</html>" } };
+      const proxyPool = fakeProxyPool();
+      const ctx = buildContext({}, { proxyPool });
+
+      const result = await browserActionExecutor(
+        node({ startUrl: "https://example.com", networkMode: "proxy" }),
+        ctx,
+      );
+
+      expect(lastRequestBody).toMatchObject({ proxy: { host: "10.0.0.5", port: 8080 } });
+      expect(result.output).toEqual({ status: 200, html: "<html>ok</html>" });
+      expect(proxyPool.reserve).toHaveBeenCalledOnce();
+      expect(proxyPool.release).toHaveBeenCalledWith("proxy1");
+      expect(proxyPool.reportError).not.toHaveBeenCalled();
+    });
+
+    it("throws a clear error when networkMode is 'proxy' but no proxy pool is wired up", async () => {
+      const ctx = buildContext({});
+
+      await expect(
+        browserActionExecutor(node({ startUrl: "https://example.com", networkMode: "proxy" }), ctx),
+      ).rejects.toThrow(/no proxy pool/i);
+    });
+
+    it("throws a clear error when the pool has nothing available", async () => {
+      const proxyPool = fakeProxyPool({ reserve: vi.fn(async () => null) });
+      const ctx = buildContext({}, { proxyPool });
+
+      await expect(
+        browserActionExecutor(node({ startUrl: "https://example.com", networkMode: "proxy" }), ctx),
+      ).rejects.toThrow(/no proxy is currently available/i);
+      expect(proxyPool.release).not.toHaveBeenCalled();
+    });
+
+    it("reports an error and still releases the proxy when browser-worker rejects the sequence (400)", async () => {
+      nextResponse = { statusCode: 400, body: { message: "Failed to navigate: net::ERR_PROXY_CONNECTION_FAILED" } };
+      const proxyPool = fakeProxyPool();
+      const ctx = buildContext({}, { proxyPool });
+
+      await expect(
+        browserActionExecutor(node({ startUrl: "https://example.com", networkMode: "proxy" }), ctx),
+      ).rejects.toThrow(/ERR_PROXY_CONNECTION_FAILED/);
+      expect(proxyPool.reportError).toHaveBeenCalledWith("proxy1");
+      expect(proxyPool.release).toHaveBeenCalledWith("proxy1");
+    });
+
+    it("does NOT report a proxy error when browser-worker itself is unreachable — an infra problem, not the proxy's fault", async () => {
+      process.env.BROWSER_WORKER_URL = "http://127.0.0.1:1";
+      const proxyPool = fakeProxyPool();
+      const ctx = buildContext({}, { proxyPool });
+
+      await expect(
+        browserActionExecutor(node({ startUrl: "https://example.com", networkMode: "proxy" }), ctx),
+      ).rejects.toThrow(/Could not reach the browser-worker service/);
+      expect(proxyPool.reportError).not.toHaveBeenCalled();
+      expect(proxyPool.release).toHaveBeenCalledWith("proxy1");
+
+      process.env.BROWSER_WORKER_URL = baseUrl;
+    });
   });
 });

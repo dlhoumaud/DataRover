@@ -28,6 +28,44 @@ describe("GET /session/live", () => {
             `<input id="myinput" style="position:fixed;top:60px;left:10px;width:100px;height:20px;" />` +
             `<div id="hovertarget" style="position:fixed;top:90px;left:10px;width:100px;height:20px;">Hover me</div>` +
             `<div id="result">not clicked</div>` +
+            // Two elements sharing the same "clean own class" and neither carrying an id — mirrors
+            // the real production bug (a common ".full-width" utility class matching hundreds of
+            // elements on a real site). Wrapping the first one in a uniquely-classed parent gives
+            // the recorder a later, unique candidate (".unique-wrapper .full-width") to fall back
+            // to once it notices ".full-width" alone isn't unique.
+            `<div class="unique-wrapper"><div class="full-width" ` +
+            `style="position:fixed;top:150px;left:10px;width:120px;height:30px;" ` +
+            `onclick="document.getElementById('result').textContent='clicked-ambiguous'">Ambiguous target</div></div>` +
+            `<div class="full-width" style="position:fixed;top:190px;left:10px;width:120px;height:20px;">Other element sharing the same class</div>` +
+            // Two links sharing the same nav classes — mirrors a second real production bug found
+            // right after the first ('.nav-link.clickable2' resolving to 35 real menu items).
+            // Unlike the '.full-width' case above, these DO carry a distinguishing attribute
+            // (`href`) that candidateSelectors now proposes ahead of the shared class.
+            `<a class="nav-link clickable2" href="/cannes-c7/" ` +
+            `style="position:fixed;top:230px;left:10px;width:120px;height:20px;">Cannes</a>` +
+            `<a class="nav-link clickable2" href="/moulinets-c14/" ` +
+            `style="position:fixed;top:260px;left:10px;width:120px;height:20px;">Moulinets</a>` +
+            // Neither the shared class NOR the repeated title is unique alone — "badge" matches
+            // both this element and its sibling below, "En stock" matches both this element and
+            // the unrelated ".tag" element further down — but the exact (class, title) PAIR
+            // narrows to exactly this one.
+            `<span class="badge" title="En stock" ` +
+            `style="position:fixed;top:290px;left:10px;width:120px;height:20px;">A</span>` +
+            `<span class="badge" title="Rupture" ` +
+            `style="position:fixed;top:320px;left:10px;width:120px;height:20px;">B</span>` +
+            `<span class="tag" title="En stock" ` +
+            `style="position:fixed;top:350px;left:10px;width:120px;height:20px;">C</span>` +
+            // Mirrors a real carousel library (slick.js) cloning a slide's entire markup verbatim
+            // for a seamless infinite-loop effect: two of these three <img> elements are
+            // byte-for-byte identical to each other (same class, same src, same alt — no
+            // combination of the IMG's own attributes can ever tell them apart), but only the
+            // clones' slide *wrapper* carries the "slick-cloned" marker class the real one lacks.
+            `<div class="slick-slide slick-cloned" style="position:fixed;top:380px;left:10px;width:120px;height:20px;">` +
+            `<img class="promo-slide-img" src="/promo.jpg" alt="Promo" style="display:block;width:100%;height:100%;" /></div>` +
+            `<div class="slick-slide" style="position:fixed;top:410px;left:10px;width:120px;height:20px;">` +
+            `<img class="promo-slide-img" src="/promo.jpg" alt="Promo" style="display:block;width:100%;height:100%;" /></div>` +
+            `<div class="slick-slide slick-cloned" style="position:fixed;top:440px;left:10px;width:120px;height:20px;">` +
+            `<img class="promo-slide-img" src="/promo.jpg" alt="Promo" style="display:block;width:100%;height:100%;" /></div>` +
             `</body></html>`,
         );
         return;
@@ -124,6 +162,85 @@ describe("GET /session/live", () => {
 
     const action = await waitForMessage(socket, (m) => m.type === "action");
     expect(action.step).toMatchObject({ type: "click", selector: "#mybutton" });
+  }, 30_000);
+
+  it("picks a unique selector over a non-unique shared class (regression for the '.full-width'-style strict-mode-violation bug)", async () => {
+    const socket = connect();
+    await waitForOpen(socket);
+    socket.send(JSON.stringify({ type: "start", startUrl: `${fixtureUrl}/interact` }));
+    await waitForMessage(socket, (m) => m.type === "ready");
+
+    socket.send(JSON.stringify({ type: "startRecording" }));
+    // Inside the ambiguous target's fixed 10..130 x, 150..180 y box. Its own ".full-width" class
+    // also matches a second, unrelated element elsewhere on the page — recording it as-is would
+    // reproduce the real bug (Playwright's strict-mode violation on replay).
+    socket.send(JSON.stringify({ type: "mouseMove", x: 50, y: 165 }));
+    socket.send(JSON.stringify({ type: "mouseDown", x: 50, y: 165 }));
+    socket.send(JSON.stringify({ type: "mouseUp", x: 50, y: 165 }));
+
+    const action = await waitForMessage(socket, (m) => m.type === "action");
+    const selector = (action.step as Record<string, unknown>).selector;
+    expect(selector).not.toBe(".full-width");
+    expect(selector).toBe(".unique-wrapper .full-width");
+  }, 30_000);
+
+  it("picks an href-based selector over a shared nav-link class (regression for the '.nav-link.clickable2' strict-mode-violation bug)", async () => {
+    const socket = connect();
+    await waitForOpen(socket);
+    socket.send(JSON.stringify({ type: "start", startUrl: `${fixtureUrl}/interact` }));
+    await waitForMessage(socket, (m) => m.type === "ready");
+
+    socket.send(JSON.stringify({ type: "startRecording" }));
+    // Inside the first nav link's fixed 10..130 x, 230..250 y box. Its own class is shared with a
+    // second, unrelated link elsewhere on the page — recording it as-is would reproduce the real
+    // bug (Playwright's strict-mode violation on replay).
+    socket.send(JSON.stringify({ type: "mouseMove", x: 50, y: 240 }));
+    socket.send(JSON.stringify({ type: "mouseDown", x: 50, y: 240 }));
+    socket.send(JSON.stringify({ type: "mouseUp", x: 50, y: 240 }));
+
+    const action = await waitForMessage(socket, (m) => m.type === "action");
+    const selector = (action.step as Record<string, unknown>).selector;
+    expect(selector).not.toBe(".nav-link.clickable2");
+    expect(selector).toBe('a[href="/cannes-c7/"]');
+  }, 30_000);
+
+  it("picks a class+attribute compound selector when neither the class nor the attribute alone is unique, but their combination is", async () => {
+    const socket = connect();
+    await waitForOpen(socket);
+    socket.send(JSON.stringify({ type: "start", startUrl: `${fixtureUrl}/interact` }));
+    await waitForMessage(socket, (m) => m.type === "ready");
+
+    socket.send(JSON.stringify({ type: "startRecording" }));
+    // Inside the first "badge" span's fixed 10..130 x, 290..310 y box. ".badge" alone matches a
+    // sibling too, and title="En stock" alone matches an unrelated ".tag" element too.
+    socket.send(JSON.stringify({ type: "mouseMove", x: 50, y: 300 }));
+    socket.send(JSON.stringify({ type: "mouseDown", x: 50, y: 300 }));
+    socket.send(JSON.stringify({ type: "mouseUp", x: 50, y: 300 }));
+
+    const action = await waitForMessage(socket, (m) => m.type === "action");
+    const selector = (action.step as Record<string, unknown>).selector;
+    expect(selector).not.toBe(".badge");
+    expect(selector).not.toBe('span[title="En stock"]');
+    expect(selector).toBe('.badge[title="En stock"]');
+  }, 30_000);
+
+  it("excludes a cloned-slide wrapper's marker class to isolate the real element, when two elements are otherwise byte-for-byte identical (regression for the real 'img.full-width' 210-match carousel-clone bug)", async () => {
+    const socket = connect();
+    await waitForOpen(socket);
+    socket.send(JSON.stringify({ type: "start", startUrl: `${fixtureUrl}/interact` }));
+    await waitForMessage(socket, (m) => m.type === "ready");
+
+    socket.send(JSON.stringify({ type: "startRecording" }));
+    // Inside the middle (real, non-cloned) slide's fixed 10..130 x, 410..430 y box. Its own <img>
+    // is attribute-for-attribute identical to the two clones above/below it — only the slide
+    // wrapper's "slick-cloned" marker class tells them apart.
+    socket.send(JSON.stringify({ type: "mouseMove", x: 50, y: 420 }));
+    socket.send(JSON.stringify({ type: "mouseDown", x: 50, y: 420 }));
+    socket.send(JSON.stringify({ type: "mouseUp", x: 50, y: 420 }));
+
+    const action = await waitForMessage(socket, (m) => m.type === "action");
+    const selector = (action.step as Record<string, unknown>).selector;
+    expect(selector).toBe('div.slick-slide:not(.slick-cloned) img[src="/promo.jpg"]');
   }, 30_000);
 
   it("records typed text as one 'type' step on blur, not one step per keystroke", async () => {

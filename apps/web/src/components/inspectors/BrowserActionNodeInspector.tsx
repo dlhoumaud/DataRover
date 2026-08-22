@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useForm, useFieldArray, useWatch, type Control, type UseFormRegister, type Path } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
+import { NetworkModeSchema } from "@datarover/workflow-types";
 import type { BrowserActionNode, BrowserActionStep, DelaySpec } from "@datarover/workflow-types";
 import { TemplateInput } from "../TemplateInput";
 import { BrowserSessionPreview } from "../BrowserSessionPreview";
@@ -51,10 +52,27 @@ const StepFormSchema = z.object({
 });
 type StepFormValues = z.infer<typeof StepFormSchema>;
 
+/** Step types the live recorder (`recorderScript.ts`) can actually produce — the exact same 7
+ *  values as that script's own `record({ type: ... })` call sites. Drives which steps show a
+ *  "réenregistrer" button: re-recording only makes sense for a step type the recorder itself
+ *  knows how to emit, never for `wait` (auto-computed timing, not a user gesture), `navigate`
+ *  (never emitted — see the recorder's own doc comment), or the drag/scrollIntoView/waitForSelector
+ *  steps that only ever get authored by hand. */
+const RECORDABLE_STEP_TYPES: ReadonlySet<StepFormValues["type"]> = new Set([
+  "click",
+  "hover",
+  "select",
+  "type",
+  "press",
+  "moveMouse",
+  "scrollPage",
+]);
+
 const BrowserActionFormSchema = z.object({
   name: z.string().min(1),
   startUrl: z.string(),
   timeoutMs: z.string(),
+  networkMode: NetworkModeSchema,
   steps: z.array(StepFormSchema).min(1, "Au moins une étape"),
 });
 type BrowserActionFormValues = z.infer<typeof BrowserActionFormSchema>;
@@ -307,6 +325,9 @@ function StepRow({
   index,
   onRemove,
   canRemove,
+  onMoveUp,
+  onMoveDown,
+  onReRecord,
   variables,
 }: {
   control: Control<BrowserActionFormValues>;
@@ -314,6 +335,15 @@ function StepRow({
   index: number;
   onRemove: () => void;
   canRemove: boolean;
+  /** `undefined` at the top/bottom of the list, or whenever the caller has nothing to move it
+   *  into (see `BrowserActionNodeInspector`'s own use of these) — renders the arrow disabled
+   *  rather than omitting it, so the row of buttons doesn't visually jump around per step. */
+  onMoveUp: (() => void) | undefined;
+  onMoveDown: (() => void) | undefined;
+  /** `undefined` when this step's own type isn't one the recorder can produce
+   *  (`RECORDABLE_STEP_TYPES`) or no `startUrl` is configured yet — hides the button entirely
+   *  rather than rendering it disabled, since there's nothing a click on it could ever open. */
+  onReRecord: (() => void) | undefined;
   variables: TemplateVariable[];
 }): JSX.Element {
   const type = useWatch({ control, name: `steps.${index}.type` as Path<BrowserActionFormValues> });
@@ -341,6 +371,36 @@ function StepRow({
             </option>
           ))}
         </select>
+        <button
+          type="button"
+          onClick={onMoveUp}
+          disabled={!onMoveUp}
+          aria-label="Monter l'étape"
+          title="Monter"
+          className="flex-shrink-0 rounded px-1.5 py-0.5 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
+        >
+          ▲
+        </button>
+        <button
+          type="button"
+          onClick={onMoveDown}
+          disabled={!onMoveDown}
+          aria-label="Descendre l'étape"
+          title="Descendre"
+          className="flex-shrink-0 rounded px-1.5 py-0.5 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
+        >
+          ▼
+        </button>
+        {onReRecord && (
+          <button
+            type="button"
+            onClick={onReRecord}
+            title="Ré-enregistrer cette étape depuis l'aperçu en direct, sans changer sa position"
+            className="flex-shrink-0 text-xs text-indigo-600 hover:text-indigo-800"
+          >
+            🔄 réenregistrer
+          </button>
+        )}
         {canRemove && (
           <button type="button" onClick={onRemove} className="flex-shrink-0 text-xs text-red-500 hover:text-red-700">
             supprimer
@@ -496,6 +556,9 @@ export function BrowserActionNodeInspector({
   // first success might be a real edit, not just the mount-time echo it's meant to filter out.
   const lastSentRef = useRef<string>(JSON.stringify(node));
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+  // Index of the step being re-recorded in place, or `null` when the preview was opened from the
+  // node's general "Aperçu en direct" button (append mode) — see `handleValidateRecording`.
+  const [replacingIndex, setReplacingIndex] = useState<number | null>(null);
 
   const {
     register,
@@ -508,6 +571,7 @@ export function BrowserActionNodeInspector({
       name: node.name,
       startUrl: node.startUrl,
       timeoutMs: node.timeoutMs !== undefined ? String(node.timeoutMs) : "",
+      networkMode: node.networkMode,
       steps: node.steps.map(stepToFormValues),
     },
   });
@@ -541,6 +605,7 @@ export function BrowserActionNodeInspector({
       startUrl: parsed.data.startUrl,
       steps: steps as BrowserActionStep[],
       timeoutMs,
+      networkMode: parsed.data.networkMode,
     };
 
     const serialized = JSON.stringify(updated);
@@ -553,15 +618,52 @@ export function BrowserActionNodeInspector({
 
   const currentStartUrl = watchedValues.startUrl ?? node.startUrl;
 
-  /** From `BrowserSessionPreview`'s "Valider" — appends every recorded step to the end of the
-   *  list, exactly like clicking "+ ajouter une action" that many times in a row, since a
-   *  recorded step is already a complete, valid `BrowserActionStep` (unlike a freshly appended
-   *  blank row, it never needs `stepToFormValues`' null-safety dance to fill in). */
+  /** From `BrowserSessionPreview`'s "Valider"/"Remplacer" — normally appends every recorded step
+   *  to the end of the list, exactly like clicking "+ ajouter une action" that many times in a
+   *  row, since a recorded step is already a complete, valid `BrowserActionStep` (unlike a
+   *  freshly appended blank row, it never needs `stepToFormValues`' null-safety dance to fill
+   *  in). When opened from a single step's own "réenregistrer" button instead (`replacingIndex`
+   *  set), the newly recorded step(s) are spliced in at that exact position instead — the
+   *  preview always appends internally, so without this the corrected step would land at the
+   *  end of the list and the user would have to drag it back into place by hand (no reordering
+   *  existed here until the '.full-width' strict-mode bug made "fix just this one step" a real,
+   *  recurring need). */
   function handleValidateRecording(steps: BrowserActionStep[]): void {
+    if (replacingIndex !== null) {
+      stepsArray.remove(replacingIndex);
+      stepsArray.insert(replacingIndex, steps.map(stepToFormValues));
+      setReplacingIndex(null);
+      return;
+    }
     for (const step of steps) {
       stepsArray.append(stepToFormValues(step));
     }
   }
+
+  function handleClosePreview(): void {
+    setIsPreviewOpen(false);
+    setReplacingIndex(null);
+  }
+
+  function handleOpenPreviewToAppend(): void {
+    setReplacingIndex(null);
+    setIsPreviewOpen(true);
+  }
+
+  function handleReRecordStep(index: number): void {
+    setReplacingIndex(index);
+    setIsPreviewOpen(true);
+  }
+
+  const replacingStep = replacingIndex !== null ? watchedValues.steps?.[replacingIndex] : undefined;
+  const replaceLabel = replacingStep
+    ? [
+        STEP_TYPE_OPTIONS.find((option) => option.value === replacingStep.type)?.label ?? replacingStep.type,
+        replacingStep.selector || replacingStep.key,
+      ]
+        .filter(Boolean)
+        .join(" — ")
+    : undefined;
 
   return (
     <div className="space-y-4">
@@ -585,11 +687,26 @@ export function BrowserActionNodeInspector({
         />
       </div>
 
+      <div>
+        <label className="block text-sm font-medium text-gray-700">Mode réseau</label>
+        <select
+          {...register("networkMode")}
+          aria-label="Mode réseau"
+          className="mt-1 w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm"
+        >
+          <option value="direct">Adresse actuelle</option>
+          <option value="proxy">Proxy disponible</option>
+        </select>
+        <p className="mt-1 text-xs text-gray-400">
+          "Proxy disponible" réserve automatiquement un proxy du pool global pour cette session.
+        </p>
+      </div>
+
       {currentStartUrl.trim().length > 0 && (
         <div>
           <button
             type="button"
-            onClick={() => setIsPreviewOpen(true)}
+            onClick={handleOpenPreviewToAppend}
             className="w-full rounded-md border border-indigo-300 bg-indigo-50 px-3 py-1.5 text-sm font-medium text-indigo-700 hover:bg-indigo-100"
           >
             Aperçu en direct &amp; enregistrement d&apos;actions
@@ -600,8 +717,9 @@ export function BrowserActionNodeInspector({
       {isPreviewOpen && (
         <BrowserSessionPreview
           startUrl={currentStartUrl}
-          onClose={() => setIsPreviewOpen(false)}
+          onClose={handleClosePreview}
           onValidate={handleValidateRecording}
+          replaceLabel={replaceLabel}
         />
       )}
 
@@ -631,6 +749,16 @@ export function BrowserActionNodeInspector({
               index={index}
               canRemove={stepsArray.fields.length > 1}
               onRemove={() => stepsArray.remove(index)}
+              onMoveUp={index > 0 ? () => stepsArray.move(index, index - 1) : undefined}
+              onMoveDown={
+                index < stepsArray.fields.length - 1 ? () => stepsArray.move(index, index + 1) : undefined
+              }
+              onReRecord={
+                currentStartUrl.trim().length > 0 &&
+                RECORDABLE_STEP_TYPES.has((watchedValues.steps?.[index]?.type ?? "wait") as StepFormValues["type"])
+                  ? () => handleReRecordStep(index)
+                  : undefined
+              }
               variables={variables}
             />
           ))}

@@ -13,6 +13,32 @@ export interface EngineVariables {
   workflow: Record<string, unknown>;
 }
 
+/** One proxy reserved from the global pool for the duration of a single node's execution. */
+export interface ReservedProxy {
+  id: string;
+  host: string;
+  port: number;
+}
+
+/**
+ * The small surface `httpExecutor`/`browserActionExecutor` need to use the global proxy pool for
+ * a node with `networkMode: "proxy"` — deliberately just this interface, never a direct
+ * `@datarover/database`/Prisma dependency: this package stays fully DB-agnostic (testable without
+ * a real database), exactly like `runNode` below is an *injected capability* rather than this
+ * package reaching out to the engine itself. The concrete, Prisma-backed implementation lives in
+ * `@datarover/database`'s `proxyPool.ts` and is wired in by `apps/worker` (the one app that
+ * already depends on `@datarover/database` directly) when it builds `RunOptions`.
+ */
+export interface ProxyPoolClient {
+  /** Reserves one available proxy, or `null` if none is available right now. */
+  reserve: () => Promise<ReservedProxy | null>;
+  /** Records a failure against a proxy — may purge it entirely once its error threshold is reached. */
+  reportError: (id: string) => Promise<void>;
+  /** Releases a proxy back to the pool — always called once the node's execution finishes,
+   *  success or failure alike; safe to call even if `reportError` already purged the same id. */
+  release: (id: string) => Promise<void>;
+}
+
 /**
  * Everything a {@link NodeExecutor} needs to do its job: a way to build an
  * up-to-date `ExpressionContext` (so templates/expressions always see the
@@ -40,6 +66,12 @@ export interface NodeExecutionContext {
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   runNode?: (node: any, ctx: NodeExecutionContext) => Promise<NodeExecutionResult>;
+  /** Present whenever the environment running this engine has a proxy pool wired up (real
+   *  executions via `apps/worker` always provide one) — absent in most executor unit tests, which
+   *  is exactly why `httpExecutor`/`browserActionExecutor` throw a clear, specific error rather
+   *  than silently falling back to a direct connection when a `networkMode: "proxy"` node runs
+   *  without one. */
+  proxyPool?: ProxyPoolClient;
 }
 
 /**

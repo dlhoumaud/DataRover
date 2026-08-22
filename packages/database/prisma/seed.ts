@@ -200,6 +200,15 @@ async function main(): Promise<void> {
     definition: qualityMonitorDefinition,
   });
 
+  // Fixed id "singleton" — the whole point of this row (see schema.prisma's doc comment) is that
+  // there is only ever one. `update: {}` here matters even more than for the other seeds above:
+  // it must never reset a threshold an admin already changed via the config page back to 5.
+  await prisma.proxyPoolConfig.upsert({
+    where: { id: "singleton" },
+    update: {},
+    create: { id: "singleton", purgeErrorThreshold: 5 },
+  });
+
   console.log('Seed OK — projet "Veille e-commerce" (2 workflows) prêt.');
 }
 

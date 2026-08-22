@@ -1,10 +1,37 @@
 /**
  * Computes an ordered list of plausible CSS selector candidates for `el`: its `#id` (if any and
- * not numeric-leading), every `data-*` attribute, its "clean" own classes (looks author-written,
- * not a hash), its full raw class list as a fallback, a parent-class + own-class combination, and
- * finally an ancestor-anchored positional path as the last resort. Never scores or validates these
- * — that's `packages/extractor`'s `scoreSelector`'s job, against a real document, once a candidate
- * has actually been chosen.
+ * not numeric-leading), every `data-*` attribute, `href`/`src` (a link's destination or an image's
+ * source is usually unique per element — see `IDENTITY_ATTRIBUTES` below), its own classes combined
+ * with any of those same attributes (see the loop right after `ownClasses` below — a shared class
+ * AND a shared attribute can each fail alone while their *combination* still narrows things down to
+ * one), its "clean" own classes alone (looks author-written, not a hash), its full raw class list
+ * as a fallback, then the more descriptive-but-less-reliably-unique
+ * `name`/`alt`/`title`/`aria-label`/`placeholder` attributes alone (see `DESCRIPTIVE_ATTRIBUTES`),
+ * a parent-class + own-class combination, and finally an ancestor-anchored positional path as the
+ * last resort. Deliberately does NOT consider `style` (asked for explicitly once, when this list
+ * still routinely produced non-unique candidates): it encodes appearance/position, not identity —
+ * two unrelated elements sharing the same layout (`position:fixed;top:10px;left:10px`, say) is
+ * normal and common, and a real element's own `style` is often mutated by page JS after load
+ * anyway, unlike `href`/`src`/`id`/`class`.
+ *
+ * Still never *scores or validates* candidates itself (that's `packages/extractor`'s
+ * `scoreSelector`'s job against a real document once a candidate has actually been chosen, for the
+ * `extract` node's own selector-scoring path — see `apps/browser-worker`'s `recorderScript.ts` for
+ * the OTHER validation this module feeds: picking the first candidate that resolves to exactly one
+ * element on the live page, right here at recording time, since a whole *ordered list* of
+ * plausible-but-unverified candidates is exactly what made a page's shared utility class
+ * (`.full-width`) or repeated navigation class (`.nav-link.clickable2`) end up recorded as-is,
+ * despite matching hundreds of elements — this broader attribute set, and the combined candidates
+ * built from it, exist specifically so a genuinely distinguishing signal (a link's own `href`, or a
+ * class *plus* a specific `title`) gets a chance to be tried at all, rather than only ever falling
+ * back to an ancestor-anchored path once every single-attribute guess turns out non-unique).
+ *
+ * One case no amount of attribute-combining can ever fix, by construction: a carousel library
+ * (e.g. slick.js) that clones a slide's entire markup verbatim for a seamless infinite-loop effect
+ * produces two REAL DOM elements with byte-for-byte identical tag/class/`alt`/`src` — every
+ * attribute this function knows about, individually or combined, matches both. Distinguishing them
+ * needs positional information (which of two visually-identical nodes is "the real one" vs. the
+ * clone), which is a different, harder problem this module doesn't attempt to solve.
  *
  * Ported verbatim (same heuristics, same order) from what was previously a single inline copy in
  * `apps/web/src/lib/htmlSandbox.ts`'s sandboxed iframe picker script. Extracted here specifically
@@ -27,6 +54,41 @@
  * variables, but never introduces an external reference, so the round trip stays safe either way.
  */
 export function candidateSelectors(el: Element): string[] {
+  // Attributes that usually identify ONE specific element rather than a category of similar ones
+  // — a link's destination, an image's source — so they're tried right after `id`/`data-*`,
+  // ahead of any class-based guess.
+  const IDENTITY_ATTRIBUTES = ["href", "src"];
+  // Attributes that are meaningful but more likely to repeat across several similar elements (a
+  // shared `placeholder`, several buttons with the same `title`) — tried after the class-based
+  // candidates, not before, since they're a weaker uniqueness signal than those.
+  const DESCRIPTIVE_ATTRIBUTES = ["name", "alt", "title", "aria-label", "placeholder"];
+  // A `src`/`href` holding an inline `data:` URI can run to megabytes — technically still a valid
+  // CSS attribute-equality selector, but a pointless, bloated one to ever record. No such cap
+  // existed for `data-*` above; left alone rather than risking that already-relied-upon behavior.
+  const MAX_ATTRIBUTE_VALUE_LENGTH = 300;
+
+  /** The `[name="value"]` fragment alone (no tag/class prefix), or `null` when the attribute is
+   *  missing/empty, its value contains a `"` (would break out of the selector's own quoting — same
+   *  guard the `data-*` loop below already uses), or is implausibly long. Factored out from
+   *  `attributeSelector` below so the exact same guard also backs the combined class+attribute
+   *  candidates further down — every attribute-based candidate in this file goes through this one
+   *  validation, never a second hand-rolled copy of it. */
+  function attributeValueFragment(node: Element, name: string): string | null {
+    const value = node.getAttribute(name);
+    if (!value || value.indexOf('"') !== -1 || value.length > MAX_ATTRIBUTE_VALUE_LENGTH) {
+      return null;
+    }
+    return "[" + name + '="' + value + '"]';
+  }
+
+  /** Tag-scoped attribute-equality selector (e.g. `a[href="..."]`). Scoped by tag name (unlike the
+   *  bare `[data-*="..."]` candidates below) mainly for readability in the recorded workflow —
+   *  `pickSelector`'s own uniqueness check doesn't depend on it either way. */
+  function attributeSelector(node: Element, name: string): string | null {
+    const fragment = attributeValueFragment(node, name);
+    return fragment ? node.tagName.toLowerCase() + fragment : null;
+  }
+
   function escapeIdent(value: string): string {
     if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
       return CSS.escape(value);
@@ -110,9 +172,29 @@ export function candidateSelectors(el: Element): string[] {
     }
   });
 
+  IDENTITY_ATTRIBUTES.forEach((name) => {
+    const selector = attributeSelector(el, name);
+    if (selector) {
+      candidates.push(selector);
+    }
+  });
+
   const own = ownClasses(el);
   if (own.length > 0) {
-    candidates.push("." + own.join("."));
+    const ownClassSelector = "." + own.join(".");
+    // Neither a shared class NOR a shared attribute is unique on its own often enough — a whole
+    // category of elements (every slider slide, every "badge" label) commonly reuses one class,
+    // and the same is true of e.g. a repeated `title`/`alt` across several of them — but the
+    // *combination* of "this class AND this exact attribute value" frequently narrows it down to
+    // one, without needing anything as drastic as a full ancestor-anchored path. Tried before the
+    // plain class alone: strictly more specific, so if it resolves at all it's a better pick.
+    IDENTITY_ATTRIBUTES.concat(DESCRIPTIVE_ATTRIBUTES).forEach((name) => {
+      const fragment = attributeValueFragment(el, name);
+      if (fragment) {
+        candidates.push(ownClassSelector + fragment);
+      }
+    });
+    candidates.push(ownClassSelector);
   }
 
   // The exact, full class list as-is — even when every class looks auto-generated, it's still a
@@ -125,6 +207,13 @@ export function candidateSelectors(el: Element): string[] {
       candidates.push(rawSelector);
     }
   }
+
+  DESCRIPTIVE_ATTRIBUTES.forEach((name) => {
+    const selector = attributeSelector(el, name);
+    if (selector) {
+      candidates.push(selector);
+    }
+  });
 
   const parent = el.parentElement;
   if (parent) {

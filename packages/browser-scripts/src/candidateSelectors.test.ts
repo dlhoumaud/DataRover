@@ -39,6 +39,60 @@ describe("candidateSelectors", () => {
     expect(candidates.some((c) => c.includes("a3f92x1"))).toBe(true);
   });
 
+  it("proposes href for a link, ahead of any class-based guess — the exact real-world case that made a shared nav-link class end up recorded as a non-unique selector", () => {
+    const el = parse('<a class="nav-link clickable2" href="/cannes-c7/">Cannes</a>');
+    const candidates = candidateSelectors(el);
+    expect(candidates).toContain('a[href="/cannes-c7/"]');
+    expect(candidates.indexOf('a[href="/cannes-c7/"]')).toBeLessThan(candidates.indexOf(".nav-link.clickable2"));
+  });
+
+  it("proposes src for an image", () => {
+    const el = parse('<img src="/logo.png" alt="Logo" />');
+    expect(candidateSelectors(el)).toContain('img[src="/logo.png"]');
+  });
+
+  it("proposes descriptive attributes (name/alt/title/aria-label/placeholder), but only after the class-based candidates — weaker uniqueness signal than a class", () => {
+    const el = parse('<input class="form-control" name="query" placeholder="Rechercher" aria-label="search" />');
+    const candidates = candidateSelectors(el);
+    expect(candidates).toContain('input[name="query"]');
+    expect(candidates).toContain('input[placeholder="Rechercher"]');
+    expect(candidates).toContain('input[aria-label="search"]');
+    expect(candidates.indexOf('input[name="query"]')).toBeGreaterThan(candidates.indexOf(".form-control"));
+  });
+
+  it("never proposes 'style' as a candidate attribute — encodes appearance/position, not identity", () => {
+    const el = parse('<div class="box" style="position:fixed;top:10px;left:10px;">x</div>');
+    expect(candidateSelectors(el).some((c) => c.includes("style"))).toBe(false);
+  });
+
+  it("skips an attribute value containing a double quote (would break the selector's own quoting)", () => {
+    const el = parse(`<a class="link" href='/x?q="weird"'>x</a>`);
+    expect(candidateSelectors(el).some((c) => c.startsWith("a[href="))).toBe(false);
+  });
+
+  it("skips an attribute value that's implausibly long (e.g. an inline data: URI)", () => {
+    const hugeSrc = "data:image/png;base64," + "A".repeat(400);
+    const el = parse(`<img src="${hugeSrc}" class="thumb" />`);
+    expect(candidateSelectors(el).some((c) => c.startsWith("img[src="))).toBe(false);
+  });
+
+  it("combines a class with a descriptive attribute — neither alone may be unique (a shared class, a repeated title), but the pair often is", () => {
+    const el = parse('<span class="badge" title="En stock">A</span>');
+    const candidates = candidateSelectors(el);
+    expect(candidates).toContain('.badge[title="En stock"]');
+    expect(candidates.indexOf('.badge[title="En stock"]')).toBeLessThan(candidates.indexOf(".badge"));
+  });
+
+  it("also combines a class with href/src, not just the descriptive attributes", () => {
+    const el = parse('<a class="nav-link clickable2" href="/cannes-c7/">Cannes</a>');
+    expect(candidateSelectors(el)).toContain('.nav-link.clickable2[href="/cannes-c7/"]');
+  });
+
+  it("never builds a class+attribute compound from an attribute that was itself rejected (quote/length guard applies here too)", () => {
+    const el = parse(`<a class="link" href='/x?q="weird"'>x</a>`);
+    expect(candidateSelectors(el).some((c) => c.includes("[href="))).toBe(false);
+  });
+
   it("combines parent + own class when both exist", () => {
     const el = parse('<div class="card"><span class="title">Name</span></div>').querySelector("span");
     expect(el).not.toBeNull();

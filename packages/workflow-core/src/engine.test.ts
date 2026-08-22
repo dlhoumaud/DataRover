@@ -56,6 +56,7 @@ describe("WorkflowEngine integration", () => {
           method: "GET",
           url: "{{ global.baseUrl }}/products",
           responseType: "json",
+          networkMode: "direct",
         },
         {
           id: "extract",
@@ -132,6 +133,7 @@ describe("WorkflowEngine integration", () => {
           method: "GET",
           url: "{{ global.baseUrl }}/products",
           responseType: "json",
+          networkMode: "direct",
         },
         {
           id: "extract",
@@ -190,6 +192,7 @@ describe("WorkflowEngine integration", () => {
           method: "GET",
           url: "http://127.0.0.1:1/unreachable",
           responseType: "json",
+          networkMode: "direct",
           timeoutMs: 200,
         },
       ],

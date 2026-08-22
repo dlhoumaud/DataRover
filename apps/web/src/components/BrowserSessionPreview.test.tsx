@@ -230,6 +230,37 @@ describe("BrowserSessionPreview", () => {
     expect(screen.queryByText("Connexion perdue avec le service de navigation.")).not.toBeInTheDocument();
   });
 
+  it("shows a replace banner and relabels 'Valider' as 'Remplacer' when replaceLabel is set", async () => {
+    const onValidate = vi.fn();
+    render(
+      <BrowserSessionPreview
+        startUrl="https://example.com"
+        onClose={vi.fn()}
+        onValidate={onValidate}
+        replaceLabel="Survoler — .full-width"
+      />,
+    );
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({ type: "ready", viewport: { width: 1280, height: 720 } });
+    socket.receive({ type: "action", step: { type: "hover", selector: "#unique" } });
+
+    expect(await screen.findByText("Survoler — .full-width")).toBeInTheDocument();
+    fireEvent.click(await screen.findByText("Remplacer (1 action)"));
+    expect(onValidate).toHaveBeenCalledWith([{ type: "hover", selector: "#unique" }]);
+  });
+
+  it("shows 'Valider', with no replace banner, when replaceLabel is omitted", async () => {
+    render(<BrowserSessionPreview startUrl="https://example.com" onClose={vi.fn()} onValidate={vi.fn()} />);
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({ type: "ready", viewport: { width: 1280, height: 720 } });
+    socket.receive({ type: "action", step: { type: "click", selector: "#a" } });
+
+    expect(await screen.findByText("Valider (1 action)")).toBeInTheDocument();
+    expect(screen.queryByText(/Remplace/)).not.toBeInTheDocument();
+  });
+
   it("closes its socket on unmount", () => {
     const { unmount } = render(
       <BrowserSessionPreview startUrl="https://example.com" onClose={vi.fn()} onValidate={vi.fn()} />,

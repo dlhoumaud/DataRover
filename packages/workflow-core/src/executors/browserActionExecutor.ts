@@ -1,7 +1,13 @@
 import { interpolate } from "@datarover/expression-engine";
 import type { BrowserActionNode, BrowserActionStep } from "@datarover/workflow-types";
 import { request } from "undici";
-import type { NodeExecutionContext, NodeExecutionResult, NodeExecutor } from "./types.js";
+import type {
+  NodeExecutionContext,
+  NodeExecutionResult,
+  NodeExecutor,
+  ProxyPoolClient,
+  ReservedProxy,
+} from "./types.js";
 
 /** Generous but bounded — a multi-step interactive sequence (several navigations/waits) needs
  *  real time; matches this node's own suggested default `timeoutMs` (see workflowGraph.ts's
@@ -66,6 +72,16 @@ function interpolateStep(
  * `browser-worker` process (see that service's `session.service.ts` for why). `BROWSER_WORKER_URL`
  * defaults to `http://localhost:3002` (plain local dev); in Docker it's the service's own name on
  * the compose network (see docker-compose.yml).
+ *
+ * `node.networkMode === "proxy"` reserves one proxy from `ctx.proxyPool` and forwards its
+ * `host`/`port` to browser-worker as an extra `proxy` field on the same request, released in a
+ * `finally` regardless of outcome. Unlike `httpExecutor`, there's no clean way from here to tell
+ * "the proxy was unreachable" apart from "the target site itself was unreachable/misbehaved" —
+ * browser-worker's Playwright navigation surfaces both as the same generic non-2xx response — so
+ * a failed request through this path always counts against the proxy's error count, a deliberate,
+ * documented simplification (see ARCHITECTURE.md) rather than a false precision this executor
+ * can't actually deliver. A failure to reach browser-worker *at all* is not counted: that's an
+ * infra problem with browser-worker itself, unrelated to which proxy (if any) was chosen.
  */
 export const browserActionExecutor: NodeExecutor<BrowserActionNode> = async (
   node: BrowserActionNode,
@@ -79,35 +95,64 @@ export const browserActionExecutor: NodeExecutor<BrowserActionNode> = async (
 
   const baseUrl = process.env.BROWSER_WORKER_URL ?? "http://localhost:3002";
 
-  let response;
-  try {
-    response = await request(`${baseUrl}/session/run`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ startUrl, steps }),
-      headersTimeout: BROWSER_ACTION_REQUEST_TIMEOUT_MS,
-      bodyTimeout: BROWSER_ACTION_REQUEST_TIMEOUT_MS,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Could not reach the browser-worker service: ${message}`);
-  }
-
-  const text = await response.body.text();
-
-  if (response.statusCode >= 400) {
-    // browser-worker distinguishes a bad/unreachable target (400) from a genuine internal
-    // failure (500), but either way this executor has nothing useful to do except surface it.
-    let message = text;
-    try {
-      const parsed = JSON.parse(text) as { message?: string };
-      message = parsed.message ?? text;
-    } catch {
-      // Not JSON — use the raw body as-is.
+  let activeReservation: { pool: ProxyPoolClient; proxy: ReservedProxy } | null = null;
+  if (node.networkMode === "proxy") {
+    if (!ctx.proxyPool) {
+      throw new Error(
+        `Node "${node.name}" is set to use a proxy, but no proxy pool is available in this environment.`,
+      );
     }
-    throw new Error(`browserAction "${node.name}" failed: ${message}`);
+    const proxy = await ctx.proxyPool.reserve();
+    if (!proxy) {
+      throw new Error(`Node "${node.name}": no proxy is currently available in the pool.`);
+    }
+    activeReservation = { pool: ctx.proxyPool, proxy };
   }
 
-  const body = JSON.parse(text) as SessionRunResponse;
-  return { output: { status: body.status, html: body.html } };
+  try {
+    let response;
+    try {
+      response = await request(`${baseUrl}/session/run`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          startUrl,
+          steps,
+          ...(activeReservation
+            ? { proxy: { host: activeReservation.proxy.host, port: activeReservation.proxy.port } }
+            : {}),
+        }),
+        headersTimeout: BROWSER_ACTION_REQUEST_TIMEOUT_MS,
+        bodyTimeout: BROWSER_ACTION_REQUEST_TIMEOUT_MS,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Could not reach the browser-worker service: ${message}`);
+    }
+
+    const text = await response.body.text();
+
+    if (response.statusCode >= 400) {
+      // browser-worker distinguishes a bad/unreachable target (400) from a genuine internal
+      // failure (500), but either way this executor has nothing useful to do except surface it.
+      let message = text;
+      try {
+        const parsed = JSON.parse(text) as { message?: string };
+        message = parsed.message ?? text;
+      } catch {
+        // Not JSON — use the raw body as-is.
+      }
+      if (activeReservation) {
+        await activeReservation.pool.reportError(activeReservation.proxy.id);
+      }
+      throw new Error(`browserAction "${node.name}" failed: ${message}`);
+    }
+
+    const body = JSON.parse(text) as SessionRunResponse;
+    return { output: { status: body.status, html: body.html } };
+  } finally {
+    if (activeReservation) {
+      await activeReservation.pool.release(activeReservation.proxy.id);
+    }
+  }
 };

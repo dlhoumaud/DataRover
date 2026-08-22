@@ -1276,6 +1276,394 @@ retourné en son contraire exact. 13/13 tests dans `session-live.e2e.test.ts`, v
 contre la vraie stack (une frappe "h" dans une session enregistrée → `{"type":"press","key":"h"}`
 reçu).
 
+### Un vrai bug produit trouvé — un sélecteur non unique pouvait faire échouer le rejeu sur un vrai site (violation de mode strict Playwright)
+
+Signalé par l'utilisateur en conditions réelles (`chronocarpe.com`) :
+`browserAction "New Navigateur" failed: Step 7 (hover) failed: locator.hover: ... strict mode
+violation: locator('.full-width') resolved to 937 elements`. Cause : `pickSelector()`
+(`recorderScript.ts`) prenait toujours le **premier** candidat renvoyé par `candidateSelectors()`
+(`packages/browser-scripts`) sans jamais vérifier qu'il désigne un seul élément sur la page réelle
+— cette fonction, par conception documentée dans son propre commentaire, ne fait que produire une
+liste **ordonnée** de candidats plausibles (id → attributs `data-*` → classes "propres" → classe
+brute complète → combo classe-parent+classe-propre → chemin ancré positionnel), sans jamais elle-
+même les valider ; c'est censé être la responsabilité d'une autre couche. Sur un site utilisant une
+classe utilitaire CSS commune (type Bootstrap), cette classe finit souvent dans les "classes
+propres" d'un élément et devient son tout premier candidat — alors qu'elle est partagée par des
+centaines d'autres éléments de la page. L'enregistreur l'enregistrait telle quelle ; au rejeu,
+Playwright refuse, à raison, d'agir sur un locator ambigu.
+
+Investigation complémentaire (agent d'exploration dédié) avant correctif, pour ne rien casser
+d'existant :
+- `apps/web/src/lib/htmlSandbox.ts`'s picker (outil de sélection visuelle du node `extract`) n'a
+  **pas** le même bug : il envoie la liste complète de candidats à l'application, qui les fait
+  scorer/valider par le vrai backend (`packages/extractor`'s `extractWithCss`, contre du HTML réel
+  via `cheerio`) et laisse un humain choisir — jamais de commit automatique sur un candidat non
+  vérifié. Rien à corriger de ce côté.
+- `packages/extractor`'s `scoreSelector` est purement syntaxique (une chaîne en entrée, aucun
+  accès au DOM) — ni réutilisable tel quel pour une vérification d'unicité, ni portable dans un
+  script injecté en navigateur (le vrai matching vit dans `extractWithCss`, qui dépend de
+  `cheerio`, une lib Node).
+- `pickSelector` est le seul endroit de tout le dépôt qui commet un candidat non validé, sans
+  supervision humaine ni passage par un scoring backend.
+- Le fixture existant de `session-live.e2e.test.ts` n'avait aucun élément à classe partagée — un
+  correctif d'unicité ne pouvait donc rien casser, mais ne bénéficiait non plus d'aucun filet de
+  sécurité contre cette régression précise.
+
+Corrigé en réécrivant `pickSelector` pour parcourir les candidats dans l'ordre et retenir le
+premier qui résout, via `document.querySelectorAll(...)`, à exactement l'élément visé (et aucun
+autre) — avec repli sur le dernier candidat (le chemin ancré, le plus spécifique produit par
+`candidateSelectors`) si aucun n'est unique, plutôt que de ne rien enregistrer.
+
+**Vérifié** : nouveau fixture dans `session-live.e2e.test.ts` avec deux éléments partageant la
+même classe `.full-width` sans aucun id (reproduisant fidèlement le cas réel) — un nouveau test
+confirme que le sélecteur enregistré est `.unique-wrapper .full-width` (un candidat plus loin dans
+la liste, réellement unique) et jamais `.full-width` seul. 14/14 tests dans ce fichier (+1), 50/50
+pour `apps/browser-worker`. `pnpm turbo run typecheck lint test` sur l'ensemble du monorepo :
+46/46 tâches, 655 tests au total. Conteneur `browser-worker` reconstruit/redémarré pour prendre en
+compte le correctif en environnement Docker live.
+
+## Itération 11 — Mise en page persistée (position des nodes), à la demande explicite de l'utilisateur
+
+Jusqu'ici (itération 3), la position de chaque node à l'écran était **entièrement éphémère** :
+recalculée par un BFS déterministe (`autoLayout`, `workflowGraph.ts`) à **chaque** chargement d'un
+workflow, jamais lue depuis ni écrite vers la définition persistée — glisser un node réorganisait
+bien l'affichage local et marquait l'éditeur "modifié", mais `flowToDefinition` ignorait
+explicitement la position au moment d'enregistrer. Rouvrir un workflow perdait donc toujours toute
+réorganisation manuelle. Signalé par l'utilisateur : "il faudrait maintenant enregistrer la
+disposition des nodes dans le workflow".
+
+- **Schéma** (`packages/workflow-types/src/action.ts`) : nouveau `NodePositionSchema` (`{x, y}`,
+  deux `number`), ajouté en `position?: NodePositionSchema` sur `BaseNodeSchema` — donc hérité par
+  tous les types de node, `BrowserActionNodeSchema` compris malgré son `.strict()` : ce dernier ne
+  rejette que les clés absentes de la forme résultante, et `position` en fait partie via la chaîne
+  `.omit({retryPolicy:true}).extend({...})` qui part bien de `BaseNodeSchema`. Optionnel (jamais
+  `.default()`) : une définition enregistrée avant cette itération continue de parser sans aucune
+  migration — `definition` est une simple colonne `Json` côté Prisma, aucun changement de schéma
+  de base de données n'a été nécessaire non plus.
+- **`apps/web/src/lib/workflowGraph.ts`** : `definitionToFlow` préfère désormais `node.position`
+  quand il existe, et n'invoque `autoLayout` que comme filet de sécurité pour les nodes qui n'en
+  ont pas encore (nouveau node, ou workflow enregistré avant cette itération). `flowToDefinition`
+  écrit la position React Flow *actuelle* de chaque node sur le node du domaine au moment de
+  l'enregistrer — c'est le seul endroit où une réorganisation manuelle devient réellement
+  persistée. Aucun autre changement nécessaire dans `WorkflowEditorPage.tsx` : `onNodesChange`
+  alimentait déjà l'état local `nodes` à chaque glissement (et marquait l'éditeur "modifié"), et
+  `handleSave` appelait déjà `flowToDefinition` avec cet état — seul le fait que cette fonction
+  ignorait la position jusqu'ici bloquait la persistance.
+- **Aucun changement** côté `apps/api` (DTOs/contrôleur/service dérivent tous directement de
+  `WorkflowDefinitionSchema`, donc valident/acceptent le nouveau champ sans modification) ni côté
+  `packages/database` (colonne `Json`, pas de migration).
+
+**Vérifié** : nouveaux tests unitaires (`workflowGraph.test.ts`, 3 ajoutés, 28 au total) — une
+position déjà enregistrée est préservée telle quelle (pas recalculée par `autoLayout`) ; un
+déplacement simulé sur le canvas est bien capturé à l'enregistrement ; le round-trip
+`definitionToFlow`/`flowToDefinition` reste structurellement identique par ailleurs. Vérifié en
+direct contre la vraie stack Docker : un workflow créé via l'API réelle avec
+`"position": {"x":123,"y":456}` sur un node, relu ensuite via `GET /workflows/:id` — position
+identique, aucune perte. `pnpm turbo run typecheck lint test` (46/46 tâches) sans régression sur
+l'ensemble du monorepo, y compris les suites e2e navigateur réel (`browser-worker`, `api`).
+
+## Itération 12 — Pool de proxies global, réutilisable par les nodes `http` et `browserAction`
+
+À la demande explicite de l'utilisateur : faire tourner les workflows (scraping notamment) à
+travers un pool de proxies mutualisé plutôt que de configurer une IP fixe par node. Décision
+validée avec l'utilisateur avant implémentation : la "purge" d'un proxy ayant atteint son seuil
+d'erreurs est une **suppression physique** de la ligne (pas un passage en statut désactivé) —
+aucun historique conservé. C'est aussi la première ressource **globale** (jamais rattachée à un
+`Project`) et le premier **endpoint paginé** de toute l'API — deux précédents établis ici, pas
+copiés d'un existant.
+
+**Fait d'architecture déterminant** : `apps/worker` dépend directement de `@datarover/database`
+(Prisma) — c'est lui, pas `apps/api`, qui persiste les `Execution`. `packages/workflow-core`, à
+l'inverse, n'a **aucune** dépendance à Prisma (architecture volontairement pure/testable sans DB).
+La logique de réservation/libération/purge vit donc dans `packages/database/src/proxyPool.ts` (sur
+un vrai `PrismaClient`), et `packages/workflow-core` ne reçoit qu'une **petite interface injectée**
+(`ProxyPoolClient`, nouveau champ optionnel sur `NodeExecutionContext`/`RunOptions`) — exactement
+le même principe que `runNode` (déjà un champ optionnel ajouté pour un seul exécuteur,
+`loopExecutor`). `apps/worker`'s `processExecutionJob.ts` construit l'implémentation concrète et
+l'injecte dans `engine.run()`. Aucun appel HTTP `packages/workflow-core` → `apps/api` n'existe.
+
+- **Schéma** (`packages/database/prisma/schema.prisma`) : `enum ProxyStatus { active disabled }`,
+  `model Proxy` (`host`, `port`, `status`, `errorCount`, `isInUse`, `reservedAt`, timestamps,
+  `@@unique([host, port])`), `model ProxyPoolConfig` (une seule ligne, id fixe `"singleton"`, même
+  convention que les ids de seed déjà fixes dans ce dépôt — pas de table de settings générique).
+- **`packages/database/src/proxyPool.ts`** (nouveau) :
+  - `reserveAvailableProxy` — **une seule requête SQL brute** (`$queryRaw`),
+    `UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING ...`. Le point le
+    plus critique de correction de toute la fonctionnalité : sans `FOR UPDATE SKIP LOCKED`, deux
+    exécutions concurrentes (`apps/worker` tourne avec `concurrency: 5`, scalable en plusieurs
+    répliques via `--scale worker=3`) pourraient réserver le même proxy "disponible" en même
+    temps — un simple `findFirst` + `update` séparés ne l'empêcherait pas. Une réservation
+    orpheline (worker mort en pleine exécution) se libère toute seule après 15 minutes
+    (`reservedAt` trop ancien), sans job de nettoyage séparé.
+  - `releaseProxy` — tolère que la ligne ait déjà été purgée (P2025) : rien à libérer, pas un bug.
+  - `reportProxyErrorAndMaybePurge` — incrémente puis, dans la même transaction, supprime la ligne
+    si le seuil (`ProxyPoolConfig.purgeErrorThreshold`) est atteint.
+  - **Vérifié** : tests d'intégration contre un vrai Postgres (même convention que le reste de ce
+    dépôt) — N appels `reserveAvailableProxy` concurrents sur un seul proxy n'en réservent qu'un
+    seul (preuve réelle du `SKIP LOCKED`) ; réservation périmée reclaimée ; purge exactement au
+    seuil, jamais avant. 9 tests.
+- **`apps/api/src/proxies/`** (nouveau module, calqué sur `projects/` pour le CRUD et sur
+  `tools`/`health` pour être un contrôleur global) : `GET /proxies?page=&limit=&status=` →
+  `{items, total, page, limit}`, `POST`/`PATCH`/`DELETE /proxies/:id` (rejette un doublon
+  host+port avec un 409 clair), `GET`/`PATCH /proxies/config`. **Vérifié** : 7 tests e2e contre un
+  vrai Postgres (CRUD complet, pagination sans doublon/trou entre pages, filtre par statut,
+  doublon rejeté, config avec sa valeur par défaut).
+- **`packages/workflow-types`** : `networkMode: z.enum(["direct","proxy"]).default("direct")`
+  ajouté à `HttpNodeSchema` et individuellement dans le `.extend()` de `BrowserActionNodeSchema`
+  (son `.strict()` exige que le champ y soit listé explicitement).
+- **`packages/workflow-core`** : `httpExecutor.ts` réserve via `ctx.proxyPool`, construit un
+  `undici.ProxyAgent` (déjà disponible, `undici@^6`, aucune dépendance nouvelle), le passe en
+  `dispatcher` ; `release` systématique en `finally`, `reportError` uniquement si `request()` a
+  levé (une réponse HTTP 4xx/5xx normale n'est jamais un throw côté undici — jamais faussement
+  imputée au proxy). `browserActionExecutor.ts` fait de même puis transmet `{host, port}` dans le
+  payload déjà envoyé à `POST /session/run` — ici, contrairement à `httpExecutor`, aucun moyen
+  fiable de distinguer "le proxy est mauvais" de "la cible est mauvaise" (browser-worker renvoie
+  la même réponse générique dans les deux cas) : un échec compte toujours contre le proxy, une
+  simplification délibérée et documentée plutôt qu'une fausse précision. Une requête qui
+  n'atteint jamais browser-worker (service injoignable) ne compte jamais contre le proxy, elle.
+  **Vérifié** : `httpExecutor.test.ts` (nouveau, 6 tests) contre un **vrai mini-proxy** local
+  gérant `CONNECT` (undici tunnelise toujours, HTTP ou HTTPS) ; `browserActionExecutor.test.ts`
+  (+5 tests, proxy factice).
+- **`apps/browser-worker`** : `session/dto.ts` accepte un `proxy?: {host, port}` optionnel,
+  `session.controller.ts` le relaie, `session.service.ts`'s `launchDedicatedBrowser` passe
+  `proxy: {server: "http://host:port"}` à `chromium.launch()`. **Vérifié en écrivant le test** :
+  Chromium tunnelise (`CONNECT`) son propre trafic de fond (Safe Browsing, compte Google, …) à
+  travers le proxy configuré, mais **jamais** un `startUrl` en `http://` — un vrai navigateur
+  forward un tel target par une requête normale en URI absolue, sans `CONNECT` du tout
+  (contrairement à `undici`, qui tunnelise systématiquement) ; le mini-proxy de test doit gérer
+  les deux styles. +3 tests réels contre un vrai Chrome.
+- **`apps/worker/src/processExecutionJob.ts`** : `buildProxyPoolClient(prisma)` construit
+  l'implémentation concrète, injectée dans `engine.run({..., proxyPool})`. **Vérifié** : 2 tests
+  d'intégration bout en bout contre un vrai Postgres + un vrai mini-proxy — un vrai `Proxy` réservé
+  via une vraie exécution puis relâché (`isInUse` repasse à `false`) ; un vrai `Proxy` purgé
+  (ligne supprimée) après un échec de connexion réel à travers le proxy.
+- **Frontend** : `HttpNodeInspector.tsx`/`BrowserActionNodeInspector.tsx` gagnent un `<select>`
+  "Mode réseau" (Adresse actuelle / Proxy disponible). Nouvelles pages globales
+  `ProxiesPage.tsx` (route `/proxies`, lien "Proxies" dans l'en-tête) — liste paginée/filtrable par
+  statut, création/activation-désactivation/suppression inline — et `ProxyConfigPage.tsx` (route
+  `/proxies/config`, distincte de la liste selon la demande explicite de l'utilisateur) pour le seuil
+  de purge. `api/proxies.ts` (nouveau, calqué sur `projects.ts`). **Vérifié** : 3 tests
+  (`HttpNodeInspector.test.tsx`, nouveau fichier — ce composant n'avait aucun test avant), 7 tests
+  (`ProxiesPage.test.tsx`), 2 tests (`ProxyConfigPage.test.tsx`), `fetch` mocké comme le reste
+  d'`apps/web` — premiers tests de page à monter un composant complet avec
+  `QueryClientProvider`/routeur, aucune page de ce genre n'était testée avant.
+
+**Un vrai bug trouvé en ajoutant le nouveau champ `<select>`** : l'ajouter *avant* la section des
+steps dans `BrowserActionNodeInspector.tsx` a décalé de un tous les index positionnels
+(`getAllByRole("combobox")[N]`) que 15 tests existants utilisaient déjà pour cibler le sélecteur de
+type d'étape — cassant leur ordre supposé (`steps` réordonnés/mal configurés dans les assertions).
+Corrigé en décalant chaque index d'un cran ; aucun changement de comportement du composant
+lui-même, seulement de la façon dont les tests déjà en place localisaient les éléments.
+
+**Vérifié globalement** : `pnpm turbo run typecheck lint test` sur l'ensemble du monorepo — 46/46
+tâches, 654 tests au total (aucune régression). Vérification manuelle en direct contre la vraie
+stack Docker : cycle complet create/get/patch(statut)/filtre/delete sur `POST/GET/PATCH/DELETE
+/proxies` et `GET/PATCH /proxies/config`, toutes les routes correctement mappées au démarrage des
+conteneurs `api`/`browser-worker`/`worker` fraîchement reconstruits.
+
+## Itération 13 — Réordonner/réenregistrer une étape `browserAction` en place, à la demande explicite de l'utilisateur
+
+Signalé par l'utilisateur en conditions réelles, immédiatement après le correctif de l'itération
+10 pour le sélecteur non-unique : le correctif portait uniquement sur **l'enregistreur** (nouvelles
+captures), pas sur les workflows **déjà enregistrés** — le node "New Navigateur" de l'utilisateur
+contenait toujours, en base, une étape `hover` avec le vieux sélecteur `.full-width` non-unique.
+Avant de corriger cette étape précise, une hypothèse fausse a été proposée ("ce survol semble
+accidentel, sans clic derrière") — l'utilisateur a eu raison de la rejeter aussitôt : "on peu très
+bien survoler un element ssans pour autant cliqué dessus". Une tentative de rejouer les coordonnées
+d'origine sur le vrai site pour déduire automatiquement un remplacement a aussi été abandonnée : le
+contenu du site (bannière cookies géo-dépendante, carrousel promotionnel dont les images changent
+quasi quotidiennement) n'est pas stable dans le temps, donc une position en pixels rejouée plus
+tard ne retombe pas fiablement sur le même élément — exactement la raison pour laquelle le
+sélecteur d'origine s'était déjà dégradé entre deux essais (937 puis 954 éléments correspondants).
+
+Faute de pouvoir deviner l'intention de l'utilisateur à sa place, deux manques réels de l'éditeur
+ont été comblés, pour que corriger une seule étape déjà enregistrée soit un geste direct plutôt
+qu'un contournement manuel :
+
+- **Réordonner une étape** (`BrowserActionNodeInspector.tsx`) : boutons "▲"/"▼" sur chaque étape
+  (`stepsArray.move`, déjà fourni par `useFieldArray` de `react-hook-form` — aucune nouvelle
+  dépendance), désactivés en haut/bas de liste plutôt que masqués, pour que la rangée de boutons ne
+  saute jamais visuellement d'une étape à l'autre.
+- **Réenregistrer une seule étape, en place** : un bouton "🔄 réenregistrer" apparaît sur toute
+  étape d'un type que l'enregistreur sait produire (`RECORDABLE_STEP_TYPES` — les 7 mêmes types que
+  `recorderScript.ts` émet : click/hover/select/type/press/moveMouse/scrollPage — jamais `wait`,
+  calculé automatiquement, ni les types purement manuels comme `dragTo`), et seulement une fois une
+  `startUrl` renseignée. Il ouvre `BrowserSessionPreview` en "mode remplacement" : un bandeau
+  ambre nomme l'étape ciblée (type + sélecteur/touche), le bouton "Valider" devient "Remplacer".
+  `BrowserSessionPreview` elle-même reste neutre sur ce choix (nouveau prop `replaceLabel`, purement
+  cosmétique — bandeau + libellé du bouton) ; c'est `BrowserActionNodeInspector`'s
+  `handleValidateRecording` qui, si un `replacingIndex` est actif, fait `stepsArray.remove(index)` +
+  `stepsArray.insert(index, ...)` au lieu d'un simple `append` — la preview enregistre toujours en
+  ajoutant en interne, donc sans cette redirection l'étape corrigée aurait atterri en fin de liste,
+  à charge pour l'utilisateur de la remonter à la main. Fermer la preview sans valider réinitialise
+  le mode remplacement (`handleClosePreview`), pour qu'un enregistrement général ultérieur ajoute
+  bien à la fin plutôt que d'écraser silencieusement la dernière étape ciblée.
+
+**Vérifié** : 7 nouveaux tests — `BrowserSessionPreview.test.tsx` (+2 : bandeau + libellé
+"Remplacer" affichés quand `replaceLabel` est fourni, "Valider" sans bandeau sinon) et
+`BrowserActionNodeInspector.test.tsx` (+5 : réordonnancement effectif, flèches désactivées aux
+extrémités, bouton "réenregistrer" absent sans `startUrl`/pour un type non enregistrable, un
+remplacement en place préserve bien l'ordre des étapes voisines — le scénario exact du bug
+rapporté —, fermeture sans validation qui n'empêche pas un enregistrement général ultérieur
+d'ajouter normalement). `pnpm turbo run typecheck lint test` sur l'ensemble du monorepo : 46/46
+tâches, 662 tests au total (aucune régression). Correctif livré uniquement dans `apps/web` (aucun
+changement serveur) : visible immédiatement via le rechargement à chaud de Vite, sans redémarrage
+de conteneur.
+
+### `candidateSelectors` élargi à `href`/`src`/`name`/`alt`/`title`/`aria-label`/`placeholder` — à la demande explicite de l'utilisateur
+
+Le correctif de sélecteur unique (plus haut) ne portait que sur **les nouvelles captures** — le
+workflow déjà enregistré de l'utilisateur en contenait d'autres, issus du même vieil enregistrement
+pré-correctif. Après avoir corrigé l'étape 7 (`.full-width`), l'exécution a échoué à l'étape 8 sur
+un second sélecteur non-unique, `.nav-link.clickable2` (35 liens de menu partageant la même classe)
+— un motif qui se répétait 3 fois dans ce seul workflow. Plutôt que de rejouer les coordonnées
+d'origine sur le vrai site pour deviner un remplacement (déjà tenté et abandonné pour le premier
+sélecteur — le contenu du site n'est pas stable dans le temps), l'utilisateur a directement pointé
+la cause structurelle : `candidateSelectors` (`packages/browser-scripts`) ne considérait jusque-là
+que `id`/`data-*`/classes — jamais les autres attributs (`href`, `src`, …) qui identifient pourtant
+un élément de façon bien plus fiable qu'une classe partagée par toute une catégorie d'éléments
+similaires (un lien de menu, une image de carrousel).
+
+Deux nouveaux groupes de candidats, insérés dans l'ordre existant (jamais en remplacement) :
+- **`IDENTITY_ATTRIBUTES`** (`href`, `src`) : insérés juste après `data-*`, avant tout candidat à
+  base de classe — un lien ou une image a normalement une cible propre à lui, un bien meilleur
+  signal d'unicité qu'une classe partagée par toute une catégorie de liens/images similaires.
+- **`DESCRIPTIVE_ATTRIBUTES`** (`name`, `alt`, `title`, `aria-label`, `placeholder`) : insérés après
+  les classes (propres puis brutes), pas avant — ces attributs sont utiles mais plus susceptibles
+  de se répéter eux aussi (plusieurs boutons partageant le même `title`, un `placeholder` générique
+  répété sur plusieurs champs).
+
+**Explicitement exclu, alors même que l'utilisateur l'avait cité en exemple** : `style`. Il encode
+l'apparence/la position, pas l'identité — deux éléments sans aucun rapport partageant la même mise
+en page (`position:fixed;top:10px;left:10px`) est banal, et le `style` d'un élément est
+fréquemment réécrit par le JS de la page après son chargement, contrairement à `href`/`src`/`id`/
+`class`. Justifié explicitement à l'utilisateur plutôt qu'implémenté sans le dire.
+
+Chaque candidat est tag-scopé (`a[href="…"]`, pas `[href="…"]` seul) pour la lisibilité du
+sélecteur enregistré, et rejeté (comme déjà `data-*`) si sa valeur contient un `"` littéral
+(casserait le guillemetage du sélecteur) — avec, en plus, une limite de longueur (300 caractères)
+absente du traitement `data-*` existant : un `src`/`href` en URI `data:` inline peut peser plusieurs
+méga-octets, un candidat techniquement valide mais absurde à enregistrer. Le correctif de la
+dernière itération (validation d'unicité contre le DOM réel avant de choisir) reste inchangé et
+continue de piloter *lequel* de ces candidats élargis est effectivement retenu — cet ajout ne fait
+qu'enrichir la liste que ce mécanisme parcourt.
+
+**Vérifié** : 6 nouveaux tests unitaires (`candidateSelectors.test.ts`, 9 → 15) — `href`/`src`
+proposés et prioritaires sur les classes, attributs descriptifs proposés après les classes,
+`style` jamais considéré, valeur contenant un `"` rejetée, valeur `data:` trop longue rejetée.
++1 test e2e contre un vrai Chrome (`session-live.e2e.test.ts`) reproduisant le scénario réel :
+deux liens partageant `.nav-link.clickable2`, sélecteur enregistré confirmé être
+`a[href="/cannes-c7/"]`, jamais la classe partagée. `pnpm turbo run typecheck lint test` :
+46/46 tâches, 669 tests au total. **Piège rencontré pendant la vérification** : le nouveau test e2e
+échouait une première fois avec l'ancien comportement encore actif — `packages/browser-scripts`
+publie sa logique via un `dist/` compilé (`tsup`), jamais lu directement depuis `src/` par ses
+consommateurs (`apps/browser-worker`, `apps/web`) ; modifier `candidateSelectors.ts` sans relancer
+`pnpm --filter @datarover/browser-scripts build` laisse tourner l'ancienne version compilée — un
+piège de plus dans la même famille que les autres problèmes de `dist/` périmé déjà documentés dans
+ce fichier, mais côté package partagé cette fois, pas côté conteneur Docker. Conteneurs
+`browser-worker`/`web` redémarrés pour prendre en compte le `dist/` reconstruit.
+
+#### Extension immédiate — combiner classe et attribut, à la demande explicite de l'utilisateur
+
+L'élargissement ci-dessus n'a pas suffi : l'exécution suivante a échoué sur un troisième sélecteur
+non-unique, `img.full-width` (210 correspondances, des images de carrousel promotionnel). L'analyse
+de l'erreur a révélé que plusieurs de ces images apparaissent **deux fois dans le DOM avec des
+attributs strictement identiques** (même `src`, même `alt`) — le carrousel (slick.js) clone ses
+diapositives pour un effet de défilement infini sans coupure, une pratique standard de cette classe
+de bibliothèques. L'utilisateur a réagi vivement ("tu peux les cumuler bordel !!!! class+ href ou
+href + id […] cumuler toutes les information d'un item pour pouvoir le retrouver") — une demande
+légitime distincte du bug ponctuel : jusqu'ici, chaque candidat reposait sur **un seul** signal
+(une classe seule, un attribut seul) ; aucun candidat ne combinait plusieurs signaux pour départager
+deux éléments dont ni la classe ni l'attribut, pris isolément, ne sont uniques sur toute la page,
+mais dont la **combinaison précise** l'est.
+
+Nouveau candidat, `candidateSelectors` (`packages/browser-scripts`) : pour chaque élément ayant au
+moins une classe "propre", un nouveau candidat est généré pour **chacun** des attributs
+`IDENTITY_ATTRIBUTES`/`DESCRIPTIVE_ATTRIBUTES` présents, sous la forme `.classe[attribut="valeur"]`
+— inséré juste avant le candidat "classe seule", puisque strictement plus spécifique : s'il résout,
+c'est un meilleur choix. Exemple concret ajouté aux tests : deux `<span class="badge">` avec des
+`title` différents ("En stock"/"Rupture") plus un `<span class="tag" title="En stock">` sans
+rapport — ni `.badge` (2 correspondances) ni `[title="En stock"]` (2 correspondances, sur un tag
+différent) n'est unique seul, mais `.badge[title="En stock"]` l'est.
+
+**Limite honnête, expliquée explicitement à l'utilisateur plutôt que passée sous silence** : cette
+extension ne pouvait *pas*, par construction, corriger l'échec qui l'a motivée. Un clone de
+diapositive produit deux **vrais** nœuds DOM dont absolument tous les attributs — classe, `src`,
+`alt`, jusqu'au moindre `data-*` — sont identiques mot pour mot ; aucune combinaison d'attributs,
+aussi exhaustive soit-elle, ne peut distinguer deux éléments réellement indiscernables au niveau des
+attributs. Distinguer un clone de l'original demande une information **positionnelle** (le Nième
+élément correspondant), un problème différent et plus difficile, volontairement non traité ici — et
+documenté comme tel dans le commentaire de tête de `candidateSelectors.ts`. Par ailleurs, cette
+étape précise (survoler une image du carrousel promotionnel) vise un contenu qui change
+quotidiennement sur le vrai site (dates dans les URLs des images) : même un sélecteur robuste
+aujourd'hui ne survivrait probablement pas à la rotation du lendemain — signalé à l'utilisateur
+comme une limite de conception de cette étape précise, pas seulement du sélecteur.
+
+**Vérifié** : 3 nouveaux tests unitaires (`candidateSelectors.test.ts`, 15 → 18) — candidat combiné
+présent et prioritaire sur la classe seule pour un attribut descriptif, combinaison avec
+`href`/`src` également, aucun candidat combiné construit à partir d'un attribut déjà rejeté
+(guillemet/longueur). +1 test e2e contre un vrai Chrome reproduisant exactement le scénario "ni la
+classe ni l'attribut seul n'est unique, la paire l'est" et confirmant le sélecteur combiné retenu.
+`pnpm turbo run typecheck lint test` : 46/46 tâches, 673 tests au total. Conteneurs
+`browser-worker`/`web` redémarrés après reconstruction du `dist/` de `packages/browser-scripts`.
+
+#### La "limite honnête" ci-dessus, résolue quand même — exclusion par différence d'ancêtre, à la demande explicite de l'utilisateur
+
+L'utilisateur a refusé la limite énoncée ci-dessus point par point : "le but est de décrire un
+fonctionnement humain [...] si je dois survoler je survole basta [...] tu peux cumuler les attributs
+[...] c'est certes plus lourd, mais plus précis". Deux choses distinctes dans cette insistance,
+prises au sérieux séparément : (1) refuser qu'on lui suggère de supprimer/contourner une étape sous
+prétexte qu'elle est difficile à sélectionner — un survol enregistré reflète un geste humain réel,
+pas une fioriture à retirer pour simplifier le problème ; (2) une intuition techniquement correcte,
+vérifiée avant d'implémenter quoi que ce soit : si le clone et l'original sont identiques dans
+*leurs propres* attributs, rien ne les distingue à ce niveau — mais un **ancêtre** peut très bien
+différer. Vérification en conditions réelles (requête `POST /render`, en lecture seule, sans aucune
+interaction avec la page — contrairement à la tentative de rejeu de coordonnées de l'itération
+précédente, qui avait accidentellement cliqué un élément du site réel) : le carrousel de
+`chronocarpe.com` utilise bien slick.js, et chaque diapositive clonée est enveloppée dans un
+`<div class="slick-slide slick-cloned" aria-hidden="true">`, tandis que la diapositive réelle
+correspondante est dans un `<div class="slick-slide">` (sans `slick-cloned`) — la classe
+distinctive existe, juste pas sur l'élément survolé lui-même.
+
+Nouvelle fonction `refineByExcludingAncestorClass` (`apps/browser-worker/src/session/
+recorderScript.ts`, pas `packages/browser-scripts` — voir plus bas pourquoi) : quand un candidat de
+`candidateSelectors` résout à un petit nombre d'éléments (≤ `ANCESTOR_REFINEMENT_MAX_MATCHES`, 20 —
+jamais tenté sur un candidat déjà large comme `.full-width` seul avec 200+ correspondances, où
+aucune exclusion d'ancêtre ne produira jamais un sélecteur sain), compare la chaîne d'ancêtres de
+l'élément visé, niveau par niveau, à celle de chacun des *autres* éléments correspondants ; au
+premier niveau où l'ancêtre d'un autre élément porte une classe que l'ancêtre — au même niveau — de
+l'élément visé n'a pas, construit `tag.classesPropresDeLElement:not(.classeEnTrop) candidat` et le
+teste contre le DOM réel. Pour le cas concret : sur le candidat `img[src="..."]` (3 correspondances,
+un original + deux clones), le premier niveau où les ancêtres divergent produit
+`div.slick-slide:not(.slick-cloned) img[src="..."]` — unique, correct.
+
+**Pourquoi dans `recorderScript.ts` et pas `candidateSelectors.ts`** : cette comparaison a
+fondamentalement besoin de voir *tous* les éléments correspondants pour en tirer une différence —
+`candidateSelectors` est, par conception (voir son propre commentaire), une fonction PAR ÉLÉMENT,
+aveugle aux autres candidats sur la page ; c'est `pickSelector`, qui a déjà le DOM réel sous la main
+au moment de l'enregistrement, qui est le bon endroit pour ce genre de comparaison.
+
+**Limite qui subsiste, honnêtement inchangée** : cette technique fonctionne parce que
+`slick-cloned` marque une différence *structurelle* réelle entre l'original et son clone. Si un jour
+un clone et son original étaient identiques absolument partout, y compris sur tous leurs ancêtres
+jusqu'à `<body>`, aucune différence n'existerait à exploiter — mais ce n'est pas le cas ici, et ne
+l'est en général pas pour ce type de bibliothèque de carrousel.
+
+**Vérifié** : nouveau fixture (`session-live.e2e.test.ts`) reproduisant fidèlement le motif réel —
+trois `<img>` strictement identiques entre eux, deux enveloppées dans un `div.slick-slide.slick-
+cloned`, une dans un simple `div.slick-slide` — confirme que le sélecteur enregistré pour l'élément
+réel est bien `div.slick-slide:not(.slick-cloned) img[src="..."]`. **Piège rencontré en écrivant ce
+test** : la classe `full-width`, réutilisée à dessein dans le fixture du tout premier bug (pour
+rester fidèle au cas réel), entrait en collision avec ce nouveau fixture partageant la même page —
+la nouvelle logique d'exclusion d'ancêtre trouvait alors, par coïncidence, une classe (`slick-slide`)
+d'un fixture sans rapport et produisait un sélecteur différent (toujours correct, mais pas celui
+attendu par le test). Corrigé en renommant la classe du nouveau fixture (`promo-slide-img`) —
+un rappel que plusieurs fixtures accumulés sur une seule page partagée peuvent se contaminer
+mutuellement une fois qu'un mécanisme regarde plus large que l'élément lui-même. `pnpm turbo run
+typecheck lint test` : 46/46 tâches, 674 tests au total. Conteneurs `browser-worker`/`web`
+redémarrés (changement `apps/browser-worker` uniquement cette fois, `packages/browser-scripts`
+inchangé).
+
 ## Explicitement hors périmètre à ce stade
 
 - **WebSocket temps réel pour les exécutions/logs** (§17.12) — le moteur émet déjà des événements
@@ -1305,8 +1693,22 @@ reçu).
   « planned for V2 ».
 - **Credentials/Auth**, **application Electron** (§17.3, §24) — seule la coquille Electron reste à
   faire pour boucler la section 24 (MVP v1) ; Docker complet est livré (itération 8).
-- **Drag-and-drop riche, undo/redo, mise en page persistée** dans l'éditeur visuel — la position
-  des nodes est recalculée à chaque chargement (voir itération 3 ci-dessus), pas sauvegardée.
+- **Drag-and-drop riche, undo/redo** dans l'éditeur visuel — **la mise en page (position des
+  nodes) est désormais persistée**, levant partiellement cette entrée (voir itération 11
+  ci-dessous) ; le reste (glisser-déposer depuis une palette externe, annuler/refaire) reste hors
+  périmètre.
+- **Authentification de proxy (utilisateur/mot de passe), proxies SOCKS** — le pool de proxies
+  (itération 12) ne gère que `host`/`port` en HTTP simple ; `undici.ProxyAgent` et l'option `proxy`
+  de Playwright supportent tous deux l'authentification nativement, mais aucun champ n'existe
+  encore pour la fournir.
+- **Distinguer un échec de proxy d'un échec de cible pour `browserAction`** — contrairement à
+  `httpExecutor` (le throw d'undici ne survient qu'en cas d'échec réseau réel, jamais pour un 4xx/
+  5xx normal), `browser-worker` renvoie la même réponse générique pour "le proxy est mauvais" et
+  "la cible est mauvaise" ; l'itération 12 compte donc toujours un tel échec contre le proxy,
+  documenté comme simplification délibérée plutôt que traité.
+- **Proxy "sticky" par exécution** — chaque node en mode "proxy" réserve indépendamment ; deux
+  nodes `http`/`browserAction` dans la même exécution peuvent se voir attribuer deux proxies
+  différents. Pas de notion de session/proxy partagé sur la durée d'une exécution complète.
 
 ## Prochaines itérations (proposition, non engageante)
 
@@ -1320,7 +1722,10 @@ reçu).
 8. ~~Node Navigateur (`browserAction`), exécution batch~~ — livré (itération 9, Phase A).
 9. ~~Node Navigateur : preview live (WebSocket + screencast CDP) + enregistrement des actions~~ —
    livré (itération 10, Phases B/C).
-10. **Coquille Electron**, dans l'esprit de la section 24 (MVP v1) — dernière pièce manquante avant
+10. ~~Mise en page persistée (position des nodes)~~ — livré (itération 11).
+11. ~~Pool de proxies global (nodes `http`/`browserAction`)~~ — livré (itération 12).
+12. ~~Réordonner/réenregistrer une étape `browserAction` en place~~ — livré (itération 13).
+13. **Coquille Electron**, dans l'esprit de la section 24 (MVP v1) — dernière pièce manquante avant
     ce jalon.
 
 ## Comment vérifier
@@ -1332,7 +1737,7 @@ docker compose up -d postgres redis     # ou: pnpm infra:up
 pnpm install                             # génère aussi le client Prisma
 pnpm db:migrate                          # première migration (interactif la 1ère fois : --name init)
 pnpm build
-pnpm test        # 600 tests Vitest (unitaires + intégration moteur + e2e api/worker sur vrai Postgres/Redis)
+pnpm test        # 674 tests Vitest (unitaires + intégration moteur + e2e api/worker sur vrai Postgres/Redis)
 pnpm lint
 pnpm typecheck
 

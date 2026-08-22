@@ -41,6 +41,13 @@ export interface SessionRunResult {
   html: string;
 }
 
+/** Already reserved from the global pool by `browserActionExecutor.ts` before this call — this
+ *  service only ever consumes a proxy, never picks or manages one itself. */
+export interface SessionProxy {
+  host: string;
+  port: number;
+}
+
 /**
  * Executes a `browserAction` node's step sequence: navigates to `startUrl`, replays every step
  * in order against a real, disposable headless browser, then returns the final page HTML once
@@ -59,10 +66,10 @@ export interface SessionRunResult {
 export class SessionService {
   private readonly logger = new Logger(SessionService.name);
 
-  async run(startUrl: string, steps: BrowserActionStep[]): Promise<SessionRunResult> {
+  async run(startUrl: string, steps: BrowserActionStep[], proxy?: SessionProxy): Promise<SessionRunResult> {
     await assertPublicTarget(startUrl);
 
-    const browser = await this.launchDedicatedBrowser();
+    const browser = await this.launchDedicatedBrowser(proxy);
     try {
       const context = await browser.newContext();
       try {
@@ -189,8 +196,17 @@ export class SessionService {
     }
   }
 
-  /** Launches a fresh, disposable browser — never cached/shared. See this class's doc comment. */
-  private async launchDedicatedBrowser(): Promise<Browser> {
+  /** Launches a fresh, disposable browser — never cached/shared. See this class's doc comment.
+   *  `proxy`, when given, is applied at the launch level (rather than `browser.newContext()`):
+   *  this service already launches one dedicated `Browser` per call/reservation, so there's never
+   *  a second context on the same process needing a *different* proxy — launch-level is simply
+   *  the simpler of the two equally-valid options Playwright offers here. Playwright itself
+   *  already passes `--proxy-bypass-list=<-loopback>` to Chromium whenever `proxy.server` is set
+   *  (confirmed directly against the actual Chromium command line it launches) — Chromium's usual
+   *  "loopback targets skip any configured proxy" default would otherwise silently defeat this
+   *  for a `startUrl` that happens to resolve to `127.0.0.1`/`localhost`, so nothing extra is
+   *  needed here for that specifically. */
+  private async launchDedicatedBrowser(proxy?: SessionProxy): Promise<Browser> {
     const executablePath = resolveChromeBinary();
     if (!executablePath) {
       throw new BadRequestException(
@@ -202,6 +218,7 @@ export class SessionService {
       executablePath,
       headless: true,
       args: ["--no-sandbox", "--disable-gpu"],
+      ...(proxy ? { proxy: { server: `http://${proxy.host}:${proxy.port}` } } : {}),
     });
   }
 }

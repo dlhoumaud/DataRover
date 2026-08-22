@@ -13,6 +13,8 @@ export type {
   NodeExecutionContext,
   NodeExecutionResult,
   NodeExecutor,
+  ProxyPoolClient,
+  ReservedProxy,
 } from "./executors/types.js";
 
 export { browserActionExecutor } from "./executors/browserActionExecutor.js";

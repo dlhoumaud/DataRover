@@ -5,6 +5,8 @@ import { ExecutionDetailPage } from "./pages/ExecutionDetailPage";
 import { ExecutionsPage } from "./pages/ExecutionsPage";
 import { ProjectDetailPage } from "./pages/ProjectDetailPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
+import { ProxiesPage } from "./pages/ProxiesPage";
+import { ProxyConfigPage } from "./pages/ProxyConfigPage";
 import { WorkflowEditorPage } from "./pages/WorkflowEditorPage";
 
 export function App(): JSX.Element {
@@ -22,6 +24,8 @@ export function App(): JSX.Element {
           element={<ExecutionsPage />}
         />
         <Route path="/executions/:executionId" element={<ExecutionDetailPage />} />
+        <Route path="/proxies" element={<ProxiesPage />} />
+        <Route path="/proxies/config" element={<ProxyConfigPage />} />
       </Routes>
     </Layout>
   );
