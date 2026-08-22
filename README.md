@@ -12,7 +12,7 @@ réel d'avancement (ce qui est implémenté vs le reste de la vision) est docume
 
 ## État actuel
 
-Onze itérations livrées : le **moteur de workflow** (packages TypeScript purs), un **backend
+Treize itérations livrées : le **moteur de workflow** (packages TypeScript purs), un **backend
 exécutable** (API NestJS + PostgreSQL + worker BullMQ), une **UI React** (éditeur visuel React
 Flow, **plein écran**, panneau d'inspection redimensionnable) branchée dessus, l'outil de
 **preview HTML/JSON/XML + sélection visuelle d'éléments** (cliquer un élément dans un aperçu
@@ -34,9 +34,18 @@ parfaitement régulière. Ce node dispose aussi d'une **preview live avec enregi
 un bouton dans son inspecteur ouvre un aperçu du navigateur en direct (streaming vidéo via
 screencast CDP), pilotable à la souris/au clavier depuis le navigateur de l'utilisateur, avec un
 bouton "Enregistrer" qui détecte clic/sélection/frappe/déplacement de souris/défilement/survol et
-les propose comme actions à ajouter au node. La **disposition des nodes dans l'éditeur visuel est
+les propose comme actions à ajouter au node. Chaque étape peut être **réordonnée** (▲/▼) ou
+**réenregistrée en place** (bouton "🔄 réenregistrer" sur les types que l'enregistreur sait
+produire) — pratique pour corriger une seule étape déjà enregistrée (ex. un sélecteur devenu
+ambigu après une évolution de la page cible) sans devoir tout refaire ni réordonner à la main. La
+**disposition des nodes dans l'éditeur visuel est
 désormais sauvegardée** avec le workflow (position de chaque node) — plus besoin de tout
-réorganiser à chaque réouverture. Le panneau d'inspection affiche désormais, pour tout node, ses
+réorganiser à chaque réouverture. Un **pool de proxies global** (menu "Proxies" de l'en-tête) est
+désormais disponible pour les nodes `http`/`browserAction` : mode réseau "Adresse actuelle"
+(défaut) ou "Proxy disponible", auquel cas le système réserve automatiquement un proxy libre du
+pool pour la durée du node, incrémente son compteur d'erreurs en cas d'échec, et le supprime
+définitivement une fois un seuil configurable atteint (5 par défaut, réglable via une page de
+configuration dédiée). Le panneau d'inspection affiche désormais, pour tout node, ses
 **variables de sortie**
 (`{{ actions.http1.output.status }}`, etc., un clic pour copier), et chaque champ `{{ }}` de
 l'éditeur propose une **autocomplétion** de ces variables (et des variables globales du projet) dès

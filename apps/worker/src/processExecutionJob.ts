@@ -1,9 +1,9 @@
-import { getPrismaClient } from "@datarover/database";
-import type { ExecutionStatus as PrismaExecutionStatus, Prisma } from "@datarover/database";
+import { getPrismaClient, releaseProxy, reportProxyErrorAndMaybePurge, reserveAvailableProxy } from "@datarover/database";
+import type { ExecutionStatus as PrismaExecutionStatus, Prisma, PrismaClient } from "@datarover/database";
 import type { ExecutionJobData } from "@datarover/queue";
 import { createConsoleLogger } from "@datarover/shared";
 import { WorkflowEngine } from "@datarover/workflow-core";
-import type { ExecutionEvent } from "@datarover/workflow-core";
+import type { ExecutionEvent, ProxyPoolClient } from "@datarover/workflow-core";
 import { WorkflowDefinitionSchema } from "@datarover/workflow-types";
 // `Execution` exists both as a Prisma model type (re-exported by
 // `@datarover/database`) and as the shape `WorkflowEngine.run` resolves with
@@ -49,6 +49,21 @@ function buildEventLogger(executionId: string): (event: ExecutionEvent) => void 
         logger.info(`[${executionId}] ${event.status} in ${event.durationMs}ms`);
         break;
     }
+  };
+}
+
+/**
+ * The one place `packages/workflow-core`'s DB-agnostic `ProxyPoolClient` interface meets a real
+ * `PrismaClient` — `apps/worker` is the only app in this position: it's what already persists
+ * `Execution` rows directly (see `processExecutionJob` below), so it's also the natural place to
+ * own the concrete, `@datarover/database`-backed implementation the engine gets injected with.
+ * `packages/workflow-core` itself never imports `@datarover/database` at all.
+ */
+function buildProxyPoolClient(prisma: PrismaClient): ProxyPoolClient {
+  return {
+    reserve: () => reserveAvailableProxy(prisma),
+    reportError: (id) => reportProxyErrorAndMaybePurge(prisma, id).then(() => undefined),
+    release: (id) => releaseProxy(prisma, id),
   };
 }
 
@@ -126,6 +141,7 @@ export async function processExecutionJob(jobData: ExecutionJobData): Promise<vo
     const result: WorkflowExecution = await engine.run(definition, {
       variables: { global: projectVariables },
       onEvent: buildEventLogger(jobData.executionId),
+      proxyPool: buildProxyPoolClient(prisma),
     });
 
     const finalStatus: PrismaExecutionStatus = result.status === "success" ? "success" : "failed";

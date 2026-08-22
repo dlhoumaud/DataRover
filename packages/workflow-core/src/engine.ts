@@ -25,6 +25,7 @@ import type {
   NodeExecutionContext,
   NodeExecutionResult,
   NodeExecutor,
+  ProxyPoolClient,
 } from "./executors/types.js";
 import { getNextNodeId, getNodeById, validateDefinition } from "./graph.js";
 import { withRetry, withTimeout } from "./retry.js";
@@ -45,6 +46,8 @@ export interface RunOptions {
   maxSteps?: number;
   /** Logger used for internal diagnostics. Defaults to a console logger named `"workflow-engine"`. */
   logger?: Logger;
+  /** Threaded straight into every node's `NodeExecutionContext` — see that field's own doc comment. */
+  proxyPool?: ProxyPoolClient;
 }
 
 function nowIso(): string {
@@ -110,6 +113,7 @@ export class WorkflowEngine {
     const logger = options?.logger ?? createConsoleLogger("workflow-engine");
     const maxSteps = options?.maxSteps ?? DEFAULT_MAX_STEPS;
     const onEvent = options?.onEvent;
+    const proxyPool = options?.proxyPool;
 
     const execution: Execution = {
       id: generateId("exec"),
@@ -205,6 +209,7 @@ export class WorkflowEngine {
         actionsOutput,
         logger,
         runNode,
+        proxyPool,
       };
 
       const startedAt = nowIso();

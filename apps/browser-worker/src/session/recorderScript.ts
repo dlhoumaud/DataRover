@@ -52,10 +52,104 @@ export function buildRecorderInitScript(): string {
   var HOVER_DWELL_MS = 600;
   var MOUSE_MOVE_SETTLE_MS = 250;
   var MODIFIER_KEYS = ["Shift", "Control", "Alt", "Meta", "CapsLock", "NumLock", "ScrollLock", "OS"];
+  // Only worth the extra document.querySelectorAll calls (see refineByExcludingAncestorClass
+  // below) once a candidate is ALREADY down to a small, plausible set — never on something like a
+  // bare ".full-width" matching 200+ elements site-wide, where no amount of ancestor-diffing will
+  // ever produce a sane, narrow-enough exclusion selector anyway.
+  var ANCESTOR_REFINEMENT_MAX_MATCHES = 20;
+  var ANCESTOR_REFINEMENT_MAX_DEPTH = 8;
 
+  /** el's own ancestor chain, immediate parent first, stopping at (and including) <body>, or
+   *  after ANCESTOR_REFINEMENT_MAX_DEPTH levels — whichever comes first. */
+  function ancestorChain(el) {
+    var chain = [];
+    var node = el.parentElement;
+    var depth = 0;
+    while (node && depth < ANCESTOR_REFINEMENT_MAX_DEPTH) {
+      chain.push(node);
+      if (node.tagName && node.tagName.toLowerCase() === "body") break;
+      node = node.parentElement;
+      depth++;
+    }
+    return chain;
+  }
+
+  /** A last refinement for a candidate that's ALMOST right but still resolves to a handful of
+   *  elements — the recurring real-world shape being a carousel library (slick.js and friends)
+   *  that clones a slide's ENTIRE markup verbatim for a seamless infinite-loop effect: the cloned
+   *  \`<img>\` itself ends up byte-for-byte identical to the real one (same class, same src, same
+   *  alt — no combination of the target element's OWN attributes can ever tell them apart), but
+   *  the CLONE's slide *wrapper* usually carries an extra marker class (e.g. "slick-cloned") the
+   *  real one doesn't. Compares \`el\`'s ancestor chain against each of the other matches', depth by
+   *  depth; the first depth where some other match's ancestor has a class \`el\`'s own
+   *  same-depth ancestor lacks becomes a \`tag.elOwnClasses:not(.extraClass)\` scope, combined with
+   *  \`candidate\` via a plain descendant combinator (safe here specifically because \`candidate\`
+   *  itself already narrows the page down to this small \`matches\` set — see the caller's own
+   *  size cap). Requires \`el\`'s ancestor at that depth to have at least one class of its own to
+   *  scope on; a depth with no class anywhere is skipped, not treated as a match. */
+  function refineByExcludingAncestorClass(candidate, el, matches) {
+    var others = [];
+    for (var m = 0; m < matches.length; m++) {
+      if (matches[m] !== el) others.push(matches[m]);
+    }
+    var elChain = ancestorChain(el);
+    for (var d = 0; d < elChain.length; d++) {
+      var elAncestor = elChain[d];
+      var elClasses = Array.prototype.slice.call(elAncestor.classList);
+      if (elClasses.length === 0) continue;
+      for (var o = 0; o < others.length; o++) {
+        var otherChain = ancestorChain(others[o]);
+        var otherAncestor = otherChain[d];
+        if (!otherAncestor) continue;
+        for (var c = 0; c < otherAncestor.classList.length; c++) {
+          var extraClass = otherAncestor.classList[c];
+          if (elClasses.indexOf(extraClass) !== -1) continue;
+          var scope = elAncestor.tagName.toLowerCase() + "." + elClasses.join(".") + ":not(." + extraClass + ")";
+          var refined = scope + " " + candidate;
+          try {
+            var refinedMatches = document.querySelectorAll(refined);
+            if (refinedMatches.length === 1 && refinedMatches[0] === el) {
+              return refined;
+            }
+          } catch (e) {
+            // Invalid/unsupported selector syntax in this browser — skip it.
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  // candidateSelectors() deliberately never validates its own candidates (see its doc comment) —
+  // it's an ORDERED list of guesses, not a ranked/verified result. Blindly taking candidates[0]
+  // used to be a real production bug: on a page using a common utility-class framework, an
+  // element's "clean own classes" candidate (e.g. ".full-width") can resolve to hundreds of other
+  // elements sharing that same utility class, so a later replay's locator.click/hover on it hits
+  // Playwright's strict-mode violation instead of the one element actually recorded. Validate each
+  // candidate against the live DOM and commit to the first one that resolves to exactly this
+  // element and no other; when a candidate comes close (a small handful of matches, not hundreds),
+  // try narrowing it further via refineByExcludingAncestorClass before giving up on it. If nothing
+  // resolves (rare — even the anchored-path last resort isn't guaranteed unique, e.g. two literal
+  // DOM clones with identical markup all the way up, which no selector can ever tell apart), fall
+  // back to the last candidate anyway rather than recording nothing, since anchoredPathSelector is
+  // still the most specific guess candidateSelectors produces.
   function pickSelector(el) {
     var candidates = candidateSelectors(el);
-    return candidates.length > 0 ? candidates[0] : null;
+    for (var i = 0; i < candidates.length; i++) {
+      try {
+        var matches = document.querySelectorAll(candidates[i]);
+        if (matches.length === 1 && matches[0] === el) {
+          return candidates[i];
+        }
+        if (matches.length > 1 && matches.length <= ANCESTOR_REFINEMENT_MAX_MATCHES) {
+          var refined = refineByExcludingAncestorClass(candidates[i], el, matches);
+          if (refined) return refined;
+        }
+      } catch (e) {
+        // Invalid/unsupported selector syntax in this browser — skip it.
+      }
+    }
+    return candidates.length > 0 ? candidates[candidates.length - 1] : null;
   }
 
   function record(step) {

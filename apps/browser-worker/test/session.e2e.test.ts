@@ -1,5 +1,7 @@
-import { createServer } from "node:http";
-import type { Server } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
+import type { IncomingMessage, Server } from "node:http";
+import { connect as netConnect } from "node:net";
+import type { Socket } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Test } from "@nestjs/testing";
 import { FastifyAdapter, type NestFastifyApplication } from "@nestjs/platform-fastify";
@@ -182,5 +184,108 @@ describe("POST /session/run", () => {
       payload: { startUrl: `${baseUrl}/form`, steps: [] },
     });
     expect(response.statusCode).toBe(400);
+  });
+
+  describe("proxy", () => {
+    let proxy: Server;
+    let proxyPort: number;
+    let forwardedRequestCount: number;
+
+    beforeAll(async () => {
+      // A real HTTP forward proxy, handling both request styles a real Chrome actually uses —
+      // unlike a client library such as undici (which tunnels everything through CONNECT by
+      // default), a browser only tunnels **https**/wss targets: a plain **http** target (this
+      // fixture's own `baseUrl`) is instead forwarded via a normal request whose request line
+      // carries the absolute URI, sent directly to the proxy, no CONNECT involved. Both paths are
+      // implemented since a real Chrome session also opens CONNECT tunnels for its own background
+      // traffic (Safe Browsing, sign-in state, …) over this same configured proxy regardless of
+      // what the test itself navigates to.
+      proxy = createServer((req, res) => {
+        forwardedRequestCount += 1;
+        const forwarded = httpRequest(req.url ?? "", { method: req.method, headers: req.headers }, (targetRes) => {
+          res.writeHead(targetRes.statusCode ?? 502, targetRes.headers);
+          targetRes.pipe(res);
+        });
+        // Real Chrome tears connections down abruptly once it's done with them (especially its
+        // own background traffic, closed well before this fixture ever shuts down) — an unhandled
+        // 'error' on either leg would otherwise crash the process with an EPIPE/ECONNRESET.
+        forwarded.on("error", () => {});
+        res.on("error", () => {});
+        req.pipe(forwarded);
+      });
+      forwardedRequestCount = 0;
+      proxy.on("connect", (req: IncomingMessage, clientSocket: Socket, head: Buffer) => {
+        const [host, portText] = (req.url ?? "").split(":");
+        const serverSocket = netConnect(Number(portText), host, () => {
+          clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+          serverSocket.write(head);
+          serverSocket.pipe(clientSocket);
+          clientSocket.pipe(serverSocket);
+        });
+        serverSocket.on("error", () => {});
+        clientSocket.on("error", () => {});
+      });
+      await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+      const proxyAddress = proxy.address();
+      if (proxyAddress === null || typeof proxyAddress === "string") {
+        throw new Error("Fixture proxy did not bind to a TCP port");
+      }
+      proxyPort = proxyAddress.port;
+    });
+
+    afterAll(async () => {
+      // A real Chrome tunnels its own background traffic (Safe Browsing, sign-in checks, …)
+      // through this proxy too, alongside the actual test navigation — some of those connections
+      // are kept alive well past the end of the test, which would otherwise make a graceful
+      // `close()` hang waiting for them. `closeAllConnections()` (Node 18.2+) tears them down
+      // immediately instead.
+      proxy.closeAllConnections();
+      await new Promise<void>((resolve, reject) => proxy.close((error) => (error ? reject(error) : resolve())));
+    });
+
+    it("navigates through the given proxy when one is supplied", async () => {
+      const countBefore = forwardedRequestCount;
+
+      const response = await app.getHttpAdapter().getInstance().inject({
+        method: "POST",
+        url: "/session/run",
+        payload: {
+          startUrl: `${baseUrl}/form`,
+          steps: [{ type: "wait", ms: 10 }],
+          proxy: { host: "127.0.0.1", port: proxyPort },
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.payload) as { html: string };
+      expect(body.html).toContain("waiting");
+      expect(forwardedRequestCount).toBeGreaterThan(countBefore);
+    }, 30_000);
+
+    it("returns 400 for a malformed proxy payload (missing port)", async () => {
+      const response = await app.getHttpAdapter().getInstance().inject({
+        method: "POST",
+        url: "/session/run",
+        payload: {
+          startUrl: `${baseUrl}/form`,
+          steps: [{ type: "wait", ms: 10 }],
+          proxy: { host: "127.0.0.1" },
+        },
+      });
+      expect(response.statusCode).toBe(400);
+    });
+
+    it("returns 400 (not a hang) when the given proxy is unreachable", async () => {
+      const response = await app.getHttpAdapter().getInstance().inject({
+        method: "POST",
+        url: "/session/run",
+        payload: {
+          startUrl: `${baseUrl}/form`,
+          steps: [{ type: "wait", ms: 10 }],
+          proxy: { host: "127.0.0.1", port: 1 },
+        },
+      });
+      expect(response.statusCode).toBe(400);
+    }, 30_000);
   });
 });

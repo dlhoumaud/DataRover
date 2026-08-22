@@ -69,8 +69,8 @@ export function Layout({ children }: { children: ReactNode }): JSX.Element {
             DataRover
           </Link>
           <nav className="flex items-center gap-4">
-            <Link to="/" className="text-sm font-medium text-gray-600 hover:text-gray-900">
-              Accueil
+            <Link to="/proxies" className="text-sm font-medium text-gray-600 hover:text-gray-900">
+              Proxies
             </Link>
             <HealthBadge />
           </nav>

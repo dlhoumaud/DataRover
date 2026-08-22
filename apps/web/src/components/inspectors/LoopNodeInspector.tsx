@@ -296,7 +296,15 @@ export function LoopNodeInspector({
 function createDefaultBodyNode(type: LoopBodyNode["type"], id: string): LoopBodyNode {
   switch (type) {
     case "http":
-      return { id, name: "Nouvelle requête HTTP", type: "http", method: "GET", url: "", responseType: "json" };
+      return {
+        id,
+        name: "Nouvelle requête HTTP",
+        type: "http",
+        method: "GET",
+        url: "",
+        responseType: "json",
+        networkMode: "direct",
+      };
     case "extract":
       return {
         id,

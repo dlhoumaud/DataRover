@@ -10,6 +10,6 @@ export class SessionController {
   @Post("run")
   @HttpCode(HttpStatus.OK)
   run(@Body(new ZodValidationPipe(SessionRunSchema)) body: SessionRunDto): Promise<SessionRunResult> {
-    return this.sessionService.run(body.startUrl, body.steps);
+    return this.sessionService.run(body.startUrl, body.steps, body.proxy);
   }
 }

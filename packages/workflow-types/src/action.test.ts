@@ -63,6 +63,41 @@ describe("HttpNodeSchema", () => {
     };
     expect(HttpNodeSchema.safeParse(input).success).toBe(false);
   });
+
+  it("defaults networkMode to 'direct' when omitted", () => {
+    const result = HttpNodeSchema.parse({
+      id: "n1",
+      name: "Fetch page",
+      type: "http",
+      method: "GET",
+      url: "https://example.com",
+    });
+    expect(result.networkMode).toBe("direct");
+  });
+
+  it("accepts an explicit networkMode of 'proxy'", () => {
+    const result = HttpNodeSchema.parse({
+      id: "n1",
+      name: "Fetch page",
+      type: "http",
+      method: "GET",
+      url: "https://example.com",
+      networkMode: "proxy",
+    });
+    expect(result.networkMode).toBe("proxy");
+  });
+
+  it("rejects an invalid networkMode", () => {
+    const input = {
+      id: "n1",
+      name: "Fetch page",
+      type: "http",
+      method: "GET",
+      url: "https://example.com",
+      networkMode: "vpn",
+    };
+    expect(HttpNodeSchema.safeParse(input).success).toBe(false);
+  });
 });
 
 describe("ExtractNodeSchema", () => {
@@ -573,6 +608,20 @@ describe("BrowserActionNodeSchema", () => {
   it("still accepts timeoutMs (not omitted, unlike retryPolicy)", () => {
     const result = BrowserActionNodeSchema.parse({ ...valid, timeoutMs: 30_000 });
     expect(result.timeoutMs).toBe(30_000);
+  });
+
+  it("defaults networkMode to 'direct' when omitted", () => {
+    const result = BrowserActionNodeSchema.parse(valid);
+    expect(result.networkMode).toBe("direct");
+  });
+
+  it("accepts an explicit networkMode of 'proxy' despite .strict()", () => {
+    const result = BrowserActionNodeSchema.parse({ ...valid, networkMode: "proxy" });
+    expect(result.networkMode).toBe("proxy");
+  });
+
+  it("rejects an invalid networkMode", () => {
+    expect(BrowserActionNodeSchema.safeParse({ ...valid, networkMode: "vpn" }).success).toBe(false);
   });
 });
 

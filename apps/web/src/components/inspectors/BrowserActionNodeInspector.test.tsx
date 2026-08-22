@@ -66,6 +66,7 @@ function defaultNode(overrides?: Partial<BrowserActionNode>): BrowserActionNode 
     startUrl: "",
     steps: [{ type: "wait", ms: 500 }],
     timeoutMs: 30_000,
+    networkMode: "direct",
     ...overrides,
   };
 }
@@ -147,7 +148,7 @@ describe("BrowserActionNodeInspector", () => {
     const onChange = vi.fn();
     render(<BrowserActionNodeInspector node={defaultNode()} onChange={onChange} />);
 
-    const stepTypeSelect = nth(screen.getAllByRole("combobox"), 0);
+    const stepTypeSelect = nth(screen.getAllByRole("combobox"), 1);
     fireEvent.change(stepTypeSelect, { target: { value: "moveMouse" } });
     fireEvent.change(screen.getByPlaceholderText("x"), { target: { value: "120" } });
     fireEvent.change(screen.getByPlaceholderText("y"), { target: { value: "340" } });
@@ -157,7 +158,7 @@ describe("BrowserActionNodeInspector", () => {
       expect(latest.steps).toEqual([{ type: "moveMouse", x: 120, y: 340 }]);
     });
 
-    const delaySelect = nth(screen.getAllByRole("combobox"), 1);
+    const delaySelect = nth(screen.getAllByRole("combobox"), 2);
     fireEvent.change(delaySelect, { target: { value: "fixed" } });
     fireEvent.change(screen.getByPlaceholderText("Délai (ms)"), { target: { value: "80" } });
 
@@ -182,7 +183,7 @@ describe("BrowserActionNodeInspector", () => {
     const onChange = vi.fn();
     render(<BrowserActionNodeInspector node={defaultNode()} onChange={onChange} />);
 
-    const stepTypeSelect = nth(screen.getAllByRole("combobox"), 0);
+    const stepTypeSelect = nth(screen.getAllByRole("combobox"), 1);
     fireEvent.change(stepTypeSelect, { target: { value: "moveMouseRandom" } });
 
     await waitFor(() => {
@@ -190,7 +191,7 @@ describe("BrowserActionNodeInspector", () => {
       expect(latest.steps).toEqual([{ type: "moveMouseRandom" }]);
     });
 
-    const delaySelect = nth(screen.getAllByRole("combobox"), 1);
+    const delaySelect = nth(screen.getAllByRole("combobox"), 2);
     fireEvent.change(delaySelect, { target: { value: "random" } });
     fireEvent.change(screen.getByPlaceholderText("Min (ms)"), { target: { value: "10" } });
     fireEvent.change(screen.getByPlaceholderText("Max (ms)"), { target: { value: "50" } });
@@ -206,7 +207,7 @@ describe("BrowserActionNodeInspector", () => {
     const node = defaultNode({ steps: [{ type: "type", selector: "#q", text: "hello" }] });
     render(<BrowserActionNodeInspector node={node} onChange={onChange} />);
 
-    const delaySelect = nth(screen.getAllByRole("combobox"), 1);
+    const delaySelect = nth(screen.getAllByRole("combobox"), 2);
     fireEvent.change(delaySelect, { target: { value: "random" } });
     fireEvent.change(screen.getByPlaceholderText("Min (ms)"), { target: { value: "30" } });
     fireEvent.change(screen.getByPlaceholderText("Max (ms)"), { target: { value: "120" } });
@@ -224,7 +225,7 @@ describe("BrowserActionNodeInspector", () => {
     const node = defaultNode({ steps: [{ type: "type", selector: "#q", text: "hello" }] });
     render(<BrowserActionNodeInspector node={node} onChange={onChange} />);
 
-    const delaySelect = nth(screen.getAllByRole("combobox"), 1);
+    const delaySelect = nth(screen.getAllByRole("combobox"), 2);
     fireEvent.change(delaySelect, { target: { value: "random" } });
     fireEvent.change(screen.getByPlaceholderText("Min (ms)"), { target: { value: "100" } });
     fireEvent.change(screen.getByPlaceholderText("Max (ms)"), { target: { value: "10" } });
@@ -331,7 +332,7 @@ describe("BrowserActionNodeInspector", () => {
     const onChange = vi.fn();
     render(<BrowserActionNodeInspector node={defaultNode()} onChange={onChange} />);
 
-    fireEvent.change(nth(screen.getAllByRole("combobox"), 0), { target: { value: type } });
+    fireEvent.change(nth(screen.getAllByRole("combobox"), 1), { target: { value: type } });
     fill();
 
     await waitFor(() => {
@@ -351,7 +352,7 @@ describe("BrowserActionNodeInspector", () => {
       const latest = onChange.mock.calls.at(-1)?.[0] as BrowserActionNode;
       expect(latest.steps).toHaveLength(2);
     });
-    fireEvent.change(nth(screen.getAllByRole("combobox"), 1), { target: { value: "click" } });
+    fireEvent.change(nth(screen.getAllByRole("combobox"), 2), { target: { value: "click" } });
     fireEvent.change(screen.getByPlaceholderText("#selecteur, .classe, …"), { target: { value: "#step2" } });
     await waitFor(() => {
       const latest = onChange.mock.calls.at(-1)?.[0] as BrowserActionNode;
@@ -365,7 +366,7 @@ describe("BrowserActionNodeInspector", () => {
     // the whole node must still reflect rows 0/1 unchanged while row 2 stays incomplete.
     fireEvent.click(screen.getByText("+ ajouter une action"));
     const callsBeforeRow3 = onChange.mock.calls.length;
-    fireEvent.change(nth(screen.getAllByRole("combobox"), 2), { target: { value: "dragTo" } });
+    fireEvent.change(nth(screen.getAllByRole("combobox"), 3), { target: { value: "dragTo" } });
     fireEvent.change(screen.getByPlaceholderText("Sélecteur source"), { target: { value: "#a" } });
     await new Promise((resolve) => setTimeout(resolve, 100));
     // Still incomplete (targetSelector empty) — no new commit beyond appending row 2 itself.
@@ -379,6 +380,137 @@ describe("BrowserActionNodeInspector", () => {
         { type: "wait", ms: 500 },
         { type: "click", selector: "#step2" },
         { type: "dragTo", sourceSelector: "#a", targetSelector: "#b" },
+      ]);
+    });
+  });
+
+  it("reorders steps with the ▲/▼ buttons", async () => {
+    const onChange = vi.fn();
+    const node = defaultNode({
+      steps: [
+        { type: "click", selector: "#first" },
+        { type: "click", selector: "#second" },
+      ],
+    });
+    render(<BrowserActionNodeInspector node={node} onChange={onChange} />);
+
+    fireEvent.click(nth(screen.getAllByLabelText("Descendre l'étape"), 0));
+
+    await waitFor(() => {
+      const latest = onChange.mock.calls.at(-1)?.[0] as BrowserActionNode;
+      expect(latest.steps).toEqual([
+        { type: "click", selector: "#second" },
+        { type: "click", selector: "#first" },
+      ]);
+    });
+  });
+
+  it("disables ▲ on the first step and ▼ on the last step, so the row of buttons never suggests a move that doesn't exist", () => {
+    const node = defaultNode({
+      steps: [
+        { type: "click", selector: "#first" },
+        { type: "click", selector: "#second" },
+      ],
+    });
+    render(<BrowserActionNodeInspector node={node} onChange={vi.fn()} />);
+
+    const upButtons = screen.getAllByLabelText("Monter l'étape");
+    const downButtons = screen.getAllByLabelText("Descendre l'étape");
+    expect(nth(upButtons, 0)).toBeDisabled();
+    expect(nth(downButtons, 1)).toBeDisabled();
+    expect(nth(upButtons, 1)).not.toBeDisabled();
+    expect(nth(downButtons, 0)).not.toBeDisabled();
+  });
+
+  it("only offers 'réenregistrer' once a startUrl is set, and only for step types the live recorder can actually produce", async () => {
+    const onChange = vi.fn();
+    const node = defaultNode({
+      startUrl: "",
+      steps: [
+        { type: "click", selector: "#a" },
+        { type: "wait", ms: 500 },
+      ],
+    });
+    render(<BrowserActionNodeInspector node={node} onChange={onChange} />);
+
+    // No startUrl yet — hidden even for the recordable "click" row.
+    expect(screen.queryByText("🔄 réenregistrer")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("{{ global.baseUrl }}/login"), {
+      target: { value: "https://example.com/login" },
+    });
+
+    // Exactly one now — the "click" row is recordable, the "wait" row never is.
+    await waitFor(() => {
+      expect(screen.getAllByText("🔄 réenregistrer")).toHaveLength(1);
+    });
+  });
+
+  it("replaces a single step in place (preserving order) when re-recorded via its own 'réenregistrer' button — regression for the '.full-width' strict-mode-violation bug, which needed a way to fix just one already-recorded step", async () => {
+    const onChange = vi.fn();
+    const node = defaultNode({
+      startUrl: "https://example.com/login",
+      steps: [
+        { type: "click", selector: "#a" },
+        { type: "hover", selector: ".full-width" }, // the step being fixed
+        { type: "click", selector: "#c" },
+      ],
+    });
+    render(<BrowserActionNodeInspector node={node} onChange={onChange} />);
+
+    const reRecordButtons = await screen.findAllByText("🔄 réenregistrer");
+    fireEvent.click(nth(reRecordButtons, 1));
+
+    // The preview opens in replace mode, naming the exact step it will replace.
+    expect(await screen.findByText(".full-width", { exact: false })).toBeInTheDocument();
+
+    const socket = FakeWebSocket.instances.at(-1);
+    if (!socket) {
+      throw new Error("BrowserSessionPreview did not open a WebSocket");
+    }
+    socket.open();
+    socket.receive({ type: "ready", viewport: { width: 1280, height: 720 } });
+    socket.receive({ type: "action", step: { type: "hover", selector: ".unique-wrapper .full-width" } });
+
+    fireEvent.click(await screen.findByText("Remplacer (1 action)"));
+
+    await waitFor(() => {
+      const latest = onChange.mock.calls.at(-1)?.[0] as BrowserActionNode;
+      expect(latest.steps).toEqual([
+        { type: "click", selector: "#a" },
+        { type: "hover", selector: ".unique-wrapper .full-width" },
+        { type: "click", selector: "#c" },
+      ]);
+    });
+  });
+
+  it("resets replace-mode when the preview is closed without validating, so the next general recording still appends", async () => {
+    const onChange = vi.fn();
+    const node = defaultNode({
+      startUrl: "https://example.com/login",
+      steps: [{ type: "hover", selector: ".full-width" }],
+    });
+    render(<BrowserActionNodeInspector node={node} onChange={onChange} />);
+
+    fireEvent.click(screen.getByText("🔄 réenregistrer"));
+    fireEvent.click(await screen.findByText("Fermer"));
+
+    fireEvent.click(screen.getByText("Aperçu en direct & enregistrement d'actions"));
+    const socket = FakeWebSocket.instances.at(-1);
+    if (!socket) {
+      throw new Error("BrowserSessionPreview did not open a WebSocket");
+    }
+    socket.open();
+    socket.receive({ type: "ready", viewport: { width: 1280, height: 720 } });
+    socket.receive({ type: "action", step: { type: "click", selector: "#new" } });
+
+    fireEvent.click(await screen.findByText("Valider (1 action)"));
+
+    await waitFor(() => {
+      const latest = onChange.mock.calls.at(-1)?.[0] as BrowserActionNode;
+      expect(latest.steps).toEqual([
+        { type: "hover", selector: ".full-width" },
+        { type: "click", selector: "#new" },
       ]);
     });
   });

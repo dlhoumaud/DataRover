@@ -104,6 +104,7 @@ export function HttpNodeInspector({
       method: node.method,
       url: node.url,
       responseType: node.responseType,
+      networkMode: node.networkMode,
       timeoutMs: node.timeoutMs !== undefined ? String(node.timeoutMs) : "",
       headers: recordToPairs(node.headers),
       queryParams: recordToPairs(node.queryParams),
@@ -152,6 +153,7 @@ export function HttpNodeInspector({
       method: values.method,
       url: values.url,
       responseType: values.responseType,
+      networkMode: values.networkMode,
       headers: pairsToRecord(values.headers),
       queryParams: pairsToRecord(values.queryParams),
       body,
@@ -210,6 +212,21 @@ export function HttpNodeInspector({
             <option value="file">file</option>
           </select>
         </div>
+      </div>
+
+      <div>
+        <label className="block text-sm font-medium text-gray-700">Mode réseau</label>
+        <select
+          {...register("networkMode")}
+          aria-label="Mode réseau"
+          className="mt-1 w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm"
+        >
+          <option value="direct">Adresse actuelle</option>
+          <option value="proxy">Proxy disponible</option>
+        </select>
+        <p className="mt-1 text-xs text-gray-400">
+          "Proxy disponible" réserve automatiquement un proxy du pool global pour cette requête.
+        </p>
       </div>
 
       <div>

@@ -1,7 +1,31 @@
 import { interpolate } from "@datarover/expression-engine";
 import type { HttpNode } from "@datarover/workflow-types";
-import { request } from "undici";
+import { ProxyAgent, request, type Dispatcher } from "undici";
 import type { NodeExecutionContext, NodeExecutionResult, NodeExecutor } from "./types.js";
+
+/** Reads `response.body` per `responseType` — the one part of the request that's identical
+ *  whether it went out directly or through a reserved proxy. */
+async function readResponseBody(
+  response: Dispatcher.ResponseData,
+  responseType: HttpNode["responseType"],
+): Promise<unknown> {
+  switch (responseType) {
+    case "json": {
+      const text = await response.body.text();
+      try {
+        return text.length > 0 ? JSON.parse(text) : undefined;
+      } catch {
+        return text;
+      }
+    }
+    case "html":
+    case "xml":
+    case "text":
+      return response.body.text();
+    case "file":
+      return response.body.arrayBuffer();
+  }
+}
 
 /** `true` for a plain data object (`{}` literal), `false` for arrays, `null`, and everything else. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -38,6 +62,10 @@ function toStringRecord(value: Record<string, unknown> | undefined): Record<stri
  * - `"json"`: parsed as JSON, falling back to the raw text if parsing fails.
  * - `"html"` / `"xml"` / `"text"`: read as text.
  * - `"file"`: read as an `ArrayBuffer`.
+ *
+ * `node.networkMode === "proxy"` reserves one proxy from `ctx.proxyPool` for exactly this call —
+ * released in a `finally` regardless of outcome, with a failure reported back to the pool (see
+ * `ProxyPoolClient`) only when `request()` itself throws, never for an ordinary non-2xx response.
  */
 export const httpExecutor: NodeExecutor<HttpNode> = async (
   node: HttpNode,
@@ -87,40 +115,46 @@ export const httpExecutor: NodeExecutor<HttpNode> = async (
     }
   }
 
-  const { statusCode, headers: responseHeaders, body } = await request(finalUrl, {
-    method: node.method,
-    headers,
-    body: bodyToSend,
-  });
-
-  let parsedBody: unknown;
-  switch (node.responseType) {
-    case "json": {
-      const text = await body.text();
-      try {
-        parsedBody = text.length > 0 ? JSON.parse(text) : undefined;
-      } catch {
-        parsedBody = text;
-      }
-      break;
+  if (node.networkMode === "proxy") {
+    if (!ctx.proxyPool) {
+      throw new Error(
+        `Node "${node.name}" is set to use a proxy, but no proxy pool is available in this environment.`,
+      );
     }
-    case "html":
-    case "xml":
-    case "text": {
-      parsedBody = await body.text();
-      break;
+    const reserved = await ctx.proxyPool.reserve();
+    if (!reserved) {
+      throw new Error(`Node "${node.name}": no proxy is currently available in the pool.`);
     }
-    case "file": {
-      parsedBody = await body.arrayBuffer();
-      break;
+    // A fresh `ProxyAgent` per reservation, never reused across nodes/reservations, so it's
+    // always closed (below) alongside the specific proxy it was built for.
+    const dispatcher = new ProxyAgent(`http://${reserved.host}:${reserved.port}`);
+    try {
+      const response = await request(finalUrl, { method: node.method, headers, body: bodyToSend, dispatcher });
+      return {
+        output: {
+          status: response.statusCode,
+          headers: response.headers,
+          body: await readResponseBody(response, node.responseType),
+        },
+      };
+    } catch (error) {
+      // A normal HTTP response (even a 4xx/5xx) never throws here — only a genuine connection/
+      // socket-level failure does, which is exactly the signal that's actually the proxy's fault
+      // rather than the target site's own answer.
+      await ctx.proxyPool.reportError(reserved.id);
+      throw error;
+    } finally {
+      await ctx.proxyPool.release(reserved.id);
+      await dispatcher.close();
     }
   }
 
+  const response = await request(finalUrl, { method: node.method, headers, body: bodyToSend });
   return {
     output: {
-      status: statusCode,
-      headers: responseHeaders,
-      body: parsedBody,
+      status: response.statusCode,
+      headers: response.headers,
+      body: await readResponseBody(response, node.responseType),
     },
   };
 };

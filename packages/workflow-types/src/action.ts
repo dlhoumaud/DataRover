@@ -37,6 +37,16 @@ const BaseNodeSchema = z.object({
 });
 
 /**
+ * How a node reaches the network: `"direct"` (the executing process's own address — existing
+ * behavior, and always the default) or `"proxy"` (reserve one available proxy from the global
+ * pool for the duration of this node's execution — see `httpExecutor.ts`/`browserActionExecutor.ts`
+ * and `NodeExecutionContext.proxyPool`). Shared between `http` and `browserAction` rather than
+ * declared twice since the semantics are identical either way.
+ */
+export const NetworkModeSchema = z.enum(["direct", "proxy"]).default("direct");
+export type NetworkMode = z.infer<typeof NetworkModeSchema>;
+
+/**
  * Performs an HTTP request.
  */
 export const HttpNodeSchema = BaseNodeSchema.extend({
@@ -47,6 +57,7 @@ export const HttpNodeSchema = BaseNodeSchema.extend({
   queryParams: z.record(z.string(), z.string()).optional(),
   body: z.unknown().optional(),
   responseType: z.enum(["html", "json", "xml", "text", "file"]).default("json"),
+  networkMode: NetworkModeSchema,
 });
 export type HttpNode = z.infer<typeof HttpNodeSchema>;
 
@@ -418,6 +429,7 @@ export const BrowserActionNodeSchema = BaseNodeSchema.omit({ retryPolicy: true }
     type: z.literal("browserAction"),
     startUrl: z.string(),
     steps: z.array(BrowserActionStepSchema).min(1),
+    networkMode: NetworkModeSchema,
   })
   .strict();
 export type BrowserActionNode = z.infer<typeof BrowserActionNodeSchema>;

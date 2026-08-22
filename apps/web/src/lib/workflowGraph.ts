@@ -239,7 +239,15 @@ export function flowToDefinition(params: {
 export function createDefaultNode(type: ActionNode["type"], id: string): ActionNode {
   switch (type) {
     case "http":
-      return { id, name: "New HTTP Request", type: "http", method: "GET", url: "", responseType: "json" };
+      return {
+        id,
+        name: "New HTTP Request",
+        type: "http",
+        method: "GET",
+        url: "",
+        responseType: "json",
+        networkMode: "direct",
+      };
     case "extract":
       return {
         id,
@@ -300,6 +308,7 @@ export function createDefaultNode(type: ActionNode["type"], id: string): ActionN
         startUrl: "",
         steps: [{ type: "wait", ms: 500 }],
         timeoutMs: 30_000,
+        networkMode: "direct",
       };
     default: {
       const exhaustiveCheck: never = type;

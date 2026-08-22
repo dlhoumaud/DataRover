@@ -10,5 +10,8 @@ import { z } from "zod";
 export const SessionRunSchema = z.object({
   startUrl: z.string().min(1),
   steps: z.array(BrowserActionStepSchema).min(1),
+  /** Chosen by `browserActionExecutor.ts` (already reserved from the global pool before this
+   *  request is even sent) — this route never picks a proxy itself, only uses the one it's given. */
+  proxy: z.object({ host: z.string().min(1), port: z.number().int().min(1).max(65535) }).optional(),
 });
 export type SessionRunDto = z.infer<typeof SessionRunSchema>;

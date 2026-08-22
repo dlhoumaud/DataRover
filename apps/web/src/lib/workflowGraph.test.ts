@@ -26,6 +26,7 @@ function buildDefinition(): WorkflowDefinition {
     method: "GET",
     url: "https://example.com/listings",
     responseType: "html",
+    networkMode: "direct",
   };
   const extractNode: ActionNode = {
     id: "extract1",

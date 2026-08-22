@@ -9,7 +9,15 @@ import {
 
 describe("getNodeOutputVariables", () => {
   it("lists status/headers/body for an http node, in addition to the bare output", () => {
-    const node: ActionNode = { id: "http1", name: "Fetch", type: "http", method: "GET", url: "", responseType: "json" };
+    const node: ActionNode = {
+      id: "http1",
+      name: "Fetch",
+      type: "http",
+      method: "GET",
+      url: "",
+      responseType: "json",
+      networkMode: "direct",
+    };
     expect(getNodeOutputVariables(node).map((v) => v.path)).toEqual([
       "actions.http1.output",
       "actions.http1.output.status",
@@ -25,6 +33,7 @@ describe("getNodeOutputVariables", () => {
       type: "browserAction",
       startUrl: "",
       steps: [{ type: "wait", ms: 100 }],
+      networkMode: "direct",
     };
     expect(getNodeOutputVariables(node).map((v) => v.path)).toEqual([
       "actions.browserAction1.output",
@@ -88,7 +97,15 @@ describe("getNodeOutputVariables", () => {
 });
 
 describe("getAvailableVariables", () => {
-  const http: ActionNode = { id: "http1", name: "Fetch", type: "http", method: "GET", url: "", responseType: "json" };
+  const http: ActionNode = {
+    id: "http1",
+    name: "Fetch",
+    type: "http",
+    method: "GET",
+    url: "",
+    responseType: "json",
+    networkMode: "direct",
+  };
   const setVar: ActionNode = { id: "setVariable1", name: "Set", type: "setVariable", variables: { count: "1" } };
 
   it("collects every node's variables except the one currently being edited", () => {

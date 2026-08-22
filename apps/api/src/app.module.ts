@@ -8,6 +8,7 @@ import { ExecutionsModule } from "./executions/executions.module";
 import { SchedulesModule } from "./schedules/schedules.module";
 import { HealthModule } from "./health/health.module";
 import { ToolsModule } from "./tools/tools.module";
+import { ProxiesModule } from "./proxies/proxies.module";
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { ToolsModule } from "./tools/tools.module";
     ExecutionsModule,
     HealthModule,
     ToolsModule,
+    ProxiesModule,
   ],
 })
 export class AppModule {}

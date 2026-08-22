@@ -174,3 +174,48 @@ export interface CreateScheduleInput {
   cronExpression?: string;
   enabled?: boolean;
 }
+
+/**
+ * DTOs for the global proxy pool, backed by GET/POST/PATCH/DELETE /proxies and GET/PATCH
+ * /proxies/config — see src/api/proxies.ts. Not project-scoped, unlike everything else above.
+ */
+
+/** Hand-typed rather than imported from `@datarover/database` (the Prisma-generated enum) — this
+ *  app never depends on that package, exactly like `ExecutionLogDto.level` above is hand-typed
+ *  rather than imported from wherever the API happens to define it. */
+export type ProxyStatus = "active" | "disabled";
+
+export interface ProxyDto {
+  id: string;
+  host: string;
+  port: number;
+  status: ProxyStatus;
+  errorCount: number;
+  isInUse: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProxyListDto {
+  items: ProxyDto[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+export interface CreateProxyInput {
+  host: string;
+  port: number;
+}
+
+export interface UpdateProxyInput {
+  host?: string;
+  port?: number;
+  status?: ProxyStatus;
+}
+
+export interface ProxyConfigDto {
+  purgeErrorThreshold: number;
+}
+
+export type UpdateProxyConfigInput = ProxyConfigDto;

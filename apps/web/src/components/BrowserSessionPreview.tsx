@@ -33,17 +33,24 @@ function isServerMessage(value: unknown): value is ServerMessage {
  *
  * "Enregistrer" toggles the in-page recorder; every `{type: "action"}` message received while it's
  * on accumulates here, exactly like `PreviewSelector`'s own accumulate-then-"Terminer" pattern —
- * "Valider" hands the accumulated steps to the caller (`BrowserActionNodeInspector`), which
- * appends them to the node's own step list, once, rather than committing each one as it arrives.
+ * "Valider" hands the accumulated steps to the caller (`BrowserActionNodeInspector`), which by
+ * default appends them to the node's own step list, once, rather than committing each one as it
+ * arrives. This component has no opinion on append-vs-replace itself — see `replaceLabel` below.
  */
 export function BrowserSessionPreview({
   startUrl,
   onClose,
   onValidate,
+  replaceLabel,
 }: {
   startUrl: string;
   onClose: () => void;
   onValidate: (steps: BrowserActionStep[]) => void;
+  /** Set by `BrowserActionNodeInspector` when this preview was opened from a single existing
+   *  step's own "réenregistrer" button rather than the node's general recording button — purely
+   *  cosmetic here (a banner + relabelled "Valider" button so the user knows what will happen),
+   *  the actual append-vs-splice-in-place decision lives entirely in the caller's `onValidate`. */
+  replaceLabel?: string;
 }): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
@@ -268,6 +275,11 @@ export function BrowserSessionPreview({
           </div>
 
           <div className="flex-1 overflow-y-auto px-4 py-3">
+            {replaceLabel && (
+              <p className="mb-3 rounded-md bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
+                Remplace l&apos;étape existante : <span className="font-mono">{replaceLabel}</span>
+              </p>
+            )}
             <button
               type="button"
               onClick={toggleRecording}
@@ -314,7 +326,8 @@ export function BrowserSessionPreview({
               disabled={accumulatedSteps.length === 0}
               className="w-full rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              Valider ({accumulatedSteps.length} action{accumulatedSteps.length === 1 ? "" : "s"})
+              {replaceLabel ? "Remplacer" : "Valider"} ({accumulatedSteps.length} action
+              {accumulatedSteps.length === 1 ? "" : "s"})
             </button>
           </div>
         </div>
